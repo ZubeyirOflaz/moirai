@@ -1,0 +1,15 @@
+[package]
+name = "moirai"
+description = "Three bodies, dancing forever: a meditative three-body visualisation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+moirai-core = { path = "../moirai-core" }
+wgpu = "30"
+winit = "0.30"
+pollster = "1"
+bytemuck = { version = "1", features = ["derive"] }
+png = "0.18"
+libc = "0.2"

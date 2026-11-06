@@ -1,0 +1,8 @@
+[package]
+name = "moirai-core"
+description = "Three-body physics, event detection (Atropos) and look-ahead steering (Lachesis) for Moirai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
