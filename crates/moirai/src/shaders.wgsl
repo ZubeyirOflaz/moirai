@@ -174,19 +174,17 @@ fn noise4(p: vec3<f32>) -> vec4<f32> {
 
 // Turbulence keeps its eddies about as large as the plume is wide: features of `l` px count
 // fully in a plume whose eddies are `l` px, and less and less over an octave or two either
-// way (a broad mix of sizes, so that nothing looks regular).
-fn octave(l: f32, e: f32) -> f32 {
-    let x = log2(l / e);
-    return exp(-0.5 * x * x);
+// way (a broad mix of sizes, so that nothing looks regular). The weights of the octaves of
+// one noise sample (features of l, l/2 and l/4 px), given x = log2(l / e).
+fn octaves(x: f32) -> vec3<f32> {
+    let d = vec3<f32>(x, x - 1.0, x - 2.0);
+    return exp(-0.5 * d * d);
 }
 
-// The octaves of one noise sample (features of l, l/2 and l/4 px) weighted for eddies of `e`
-// px: the weighted sum and the sum of squared weights (which normalises the variance).
-fn eddies(n: vec4<f32>, l: f32, e: f32) -> vec2<f32> {
-    let a = octave(l, e);
-    let b = octave(0.5 * l, e);
-    let c = octave(0.25 * l, e);
-    return vec2<f32>(a * n.x + b * n.y + c * n.z, a * a + b * b + c * c);
+// Those octaves of noise sample `n`, weighted by `k`: the weighted sum and the sum of squared
+// weights (which normalises the variance).
+fn eddies(n: vec4<f32>, k: vec3<f32>) -> vec2<f32> {
+    return vec2<f32>(dot(k, n.xyz), dot(k, k));
 }
 
 struct SmokeOut {
@@ -281,6 +279,10 @@ fn smoke(i: SmokeOut, near: bool) -> vec4<f32> {
     let pp = g.scale / g.smoke_freq; // px per noise period
     let w = smoke_width(age);
     let seed = f32(i.body) * 0.29;
+    // log2 of the noise's quarter period and of the eddy size (2.2 plume half-widths), from
+    // which every octave weight follows
+    let lq = log2(0.25 * pp);
+    let le = log2(2.2 * w);
 
     // freshly shed plasma streams back from the body and slows down, then only churns in place
     let uf = u + g.smoke_flow / pp * (1.0 - exp(-8.0 * age));
@@ -289,8 +291,9 @@ fn smoke(i: SmokeOut, near: bool) -> vec4<f32> {
     // swells into puffs and narrows between them (features a few plume widths long).
     let big = noise4(vec3<f32>(uf * 0.25, 0.31 + seed, g.time * 0.011));
     let mid = noise4(vec3<f32>(uf, 0.77 + seed, g.time * 0.019));
-    let sa = eddies(big, pp, 4.0 * w);
-    let sb = eddies(mid, 0.25 * pp, 4.0 * w);
+    let ls = le + 0.862496; // log2 of 4 half-widths: 4 / 2.2
+    let sa = eddies(big, octaves(lq + 2.0 - ls));
+    let sb = eddies(mid, octaves(lq - ls));
     let swell = (sa.x + sb.x) * inverseSqrt(sa.y + sb.y + 1e-3);
     let wl = w * exp(0.3 * clamp(swell, -2.5, 2.0));
     let lat = (dir.x * rel.y - dir.y * rel.x) - clamp(0.5 * big.w, -1.0, 1.0) * smoke_drift_amp(age);
@@ -305,16 +308,17 @@ fn smoke(i: SmokeOut, near: bool) -> vec4<f32> {
     let q1 = vec3<f32>(uf, lat / pp + 0.37 + seed, g.time * 0.021);
     let n1 = noise4(q1);
     let n1b = noise4(q1 + vec3<f32>(0.5, 0.23, 0.61));
-    let s1 = eddies(n1, 0.25 * pp, e);
-    let se = eddies(n1, 0.25 * pp, 1.6 * e);
+    let s1 = eddies(n1, octaves(lq - le));
+    let se = eddies(n1, octaves(lq - le - 0.678072)); // eddies 1.6 times larger
     let lumps = se.x * inverseSqrt(se.y + 1e-3);
-    let wx = eddies(n1, 0.25 * pp, 2.5 * e);
-    let wy = eddies(n1b, 0.25 * pp, 2.5 * e);
+    let kw = octaves(lq - le - 1.321928); // eddies 2.5 times larger
+    let wx = eddies(n1, kw);
+    let wy = eddies(n1b, kw);
     let swirl = vec2<f32>(wx.x * inverseSqrt(wx.y + 1e-3), wy.x * inverseSqrt(wy.y + 1e-3)) * (0.35 * e);
 
     // fine eddies (pp/16 to pp/64): soft variations of density inside the plume
     let q2 = vec3<f32>(4.0 * (uf + swirl.x / pp), 4.0 * (lat + swirl.y) / pp + 0.71 + seed, g.time * 0.033 + 0.5);
-    let s2 = eddies(noise4(q2), 0.0625 * pp, e);
+    let s2 = eddies(noise4(q2), octaves(lq - 2.0 - le));
     let billow = (s1.x + s2.x) * inverseSqrt(s1.y + s2.y + 1e-3); // about unit variance
 
     // a soft plume with lumpy edges and denser puffs; late in life it gathers into clouds
