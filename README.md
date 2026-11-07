@@ -45,7 +45,9 @@ See `moirai --help` for all options, `moirai --list` for the choreographies, and
   puffs that grow with it, meanders, churns slowly and dissolves. `--trails lines` draws smooth
   glowing threads. `--trails dust` sheds fine twinkling motes that stay close to the path and
   only slowly drift apart; a body circling quickly keeps only about its last loop and a half,
-  so close, fast swirls stay clear. `t` cycles through them while running.
+  so close, fast swirls stay clear (after a sudden sharp turn, such as a slingshot, the older
+  part of the trail fades out over a second or two instead of vanishing). `t` cycles through
+  them while running.
 - **Palettes**: the rotation uses the featured palettes `solar`, `moonlight` and `aurora`
   (analogous colours plus one pale member). `ember-ice` and `nebula` are still available:
   `--palette solar` shows only one palette, `--palette solar,nebula` a set, `--palette all`

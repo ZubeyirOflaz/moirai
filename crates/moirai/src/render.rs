@@ -119,10 +119,14 @@ pub struct Look {
 /// Dust motes are shed every `DUST_SPACING * radius` of path, where `radius` is the scene's
 /// framing radius: about 0.4 px apart on an 800 px tall frame.
 const DUST_SPACING: f64 = 0.0009;
-/// Stardust also fades out once its path has turned this far (radians): a body circling quickly
-/// keeps only its last loop and a half, which would otherwise pile up into a busy knot, while
-/// one on a long, gentle arc keeps its whole trail.
+/// A stardust trail is cut short where its path has turned this far (radians): a body circling
+/// quickly keeps only its last loop and a half, which would otherwise pile up into a busy knot,
+/// while one on a long, gentle arc keeps its whole trail.
 const DUST_TURNING: f32 = 3.0 * std::f32::consts::PI;
+/// When that cut moves closer (a sharp turn, such as a slingshot past another body, uses up much
+/// of the allowance at once), the trail shrinks toward it by at most this share of its full
+/// length per second instead of losing its tail at once.
+const DUST_RETRACT: f32 = 0.3;
 /// The smoke's noise period along the path is `SMOKE_PERIOD * radius` (about 200 px on an 800
 /// px tall frame). The shader samples the noise at several multiples of it, with features from
 /// a whole period (the slow meander) down to 1/64 of one (the finest eddies near the body).
@@ -341,6 +345,9 @@ pub struct Renderer {
     stars: Instances<Star>,
     /// Age of every trail point as drawn (scratch, rebuilt every frame).
     ages: [Vec<f32>; 3],
+    /// Share of each stardust trail shown, and the time and scene it was last updated for.
+    dust_reach: [f32; 3],
+    dust_clock: Option<(f32, u32)>,
 }
 
 fn uniform_entry(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
@@ -661,28 +668,42 @@ fn build_segments(out: &mut Vec<Seg>, f: &FrameInput, ages: &[Vec<f32>; 3], scal
     }
 }
 
-/// The ages of a trail's points when it also fades out by turning: a point is as old as the
-/// larger of its age in time and how far the path has turned since, as a share of `budget`
-/// radians (blended smoothly, so that the fade along the trail has no kink).
-fn turning_ages(pts: &[TrailPoint], budget: f32, out: &mut Vec<f32>) {
-    out.clear();
-    out.extend(pts.iter().map(|p| p.age));
+/// How much of a trail (as a share of its full length, from the body back) is left before its
+/// path has turned `budget` radians; 1 if it never turns that far.
+fn turning_reach(pts: &[TrailPoint], budget: f32) -> f32 {
     let mut turned = 0.0f32;
     let mut heading: Option<f32> = None; // of the chord after the current point
     for k in (0..pts.len().saturating_sub(1)).rev() {
         let (a, b) = (pts[k].p, pts[k + 1].p);
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-        if dx != 0.0 || dy != 0.0 {
-            let h = dy.atan2(dx);
-            if let Some(next) = heading {
-                let pi = std::f32::consts::PI;
-                turned += ((next - h + pi).rem_euclid(2.0 * pi) - pi).abs();
-            }
-            heading = Some(h);
+        if dx == 0.0 && dy == 0.0 {
+            continue;
         }
-        let by_turning = turned / budget;
-        out[k] = (out[k].powi(4) + by_turning.powi(4)).powf(0.25).min(1.0);
+        let h = dy.atan2(dx);
+        if let Some(next) = heading {
+            let pi = std::f32::consts::PI;
+            let turn = ((next - h + pi).rem_euclid(2.0 * pi) - pi).abs();
+            if turned + turn >= budget {
+                // spread the joint's turn over the chord before it, so the cut moves smoothly
+                let f = (budget - turned) / turn;
+                return pts[k + 1].age + (pts[k].age - pts[k + 1].age) * f;
+            }
+            turned += turn;
+        }
+        heading = Some(h);
     }
+    1.0
+}
+
+/// The share of a stardust trail shown after `dt` seconds, moving toward `target`: it grows
+/// with the trail (which never outpaces the motes being shed), but shrinks by at most
+/// `DUST_RETRACT` per second and slows down as it gets there.
+fn ease_reach(current: f32, target: f32, dt: f32) -> f32 {
+    if target >= current {
+        return target;
+    }
+    let rate = ((current - target) * 4.0).min(DUST_RETRACT);
+    (current - rate * dt).max(target)
 }
 
 impl Renderer {
@@ -821,6 +842,8 @@ impl Renderer {
             motes: Instances::new(dev, "motes", 65536),
             stars: Instances::new(dev, "stars", STAR_COUNT),
             ages: Default::default(),
+            dust_reach: [1.0; 3],
+            dust_clock: None,
         }
     }
 
@@ -910,14 +933,24 @@ impl Renderer {
             TrailStyle::Dust => DUST_GLOW_SPAN,
             TrailStyle::Lines => 1.0,
         };
-        for (ages, pts) in self.ages.iter_mut().zip(f.trails) {
-            if style == TrailStyle::Dust {
-                turning_ages(pts, DUST_TURNING, ages);
+        // Stardust shows as much of each trail as its turning allows, easing toward that when it
+        // shrinks; the other styles show whole trails.
+        let dust = style == TrailStyle::Dust;
+        let dt = match self.dust_clock {
+            Some((time, salt)) if salt == f.salt && f.time >= time => Some((f.time - time).min(0.5)),
+            _ => None, // first stardust frame of this scene: no history to ease from
+        };
+        for ((ages, pts), shown) in self.ages.iter_mut().zip(f.trails).zip(&mut self.dust_reach) {
+            ages.clear();
+            if dust {
+                let target = turning_reach(pts, DUST_TURNING);
+                *shown = dt.map_or(target, |dt| ease_reach(*shown, target, dt)).max(0.01);
+                ages.extend(pts.iter().map(|p| (p.age / *shown).min(1.0)));
             } else {
-                ages.clear();
                 ages.extend(pts.iter().map(|p| p.age));
             }
         }
+        self.dust_clock = dust.then_some((f.time, f.salt));
         build_segments(&mut self.segs.data, f, &self.ages, scale, smoke_period);
         self.segs.upload(gpu);
         self.motes.data.clear();
@@ -1111,17 +1144,15 @@ mod tests {
     }
 
     #[test]
-    fn stardust_fades_by_turning() {
+    fn stardust_is_cut_where_the_path_has_turned_enough() {
         use std::f32::consts::PI;
         let budget = 3.0 * PI;
-        let mut ages = Vec::new();
-        // a straight path keeps its ages in time
+        // a straight path is shown whole
         let line: Vec<TrailPoint> = (0..100)
             .map(|i| TrailPoint { p: [i as f32 * 0.01, 0.0], age: 1.0 - i as f32 / 99.0, s: i as f64 * 0.01 })
             .collect();
-        turning_ages(&line, budget, &mut ages);
-        assert!(ages.iter().zip(&line).all(|(a, p)| (a - p.age).abs() < 1e-5));
-        // two quick loops (oldest first), young in time: the turning sets the ages
+        assert_eq!(turning_reach(&line, budget), 1.0);
+        // two quick loops (oldest first) that are young in time: cut a loop and a half back
         let n = 400;
         let circle: Vec<TrailPoint> = (0..=n)
             .map(|i| {
@@ -1129,10 +1160,24 @@ mod tests {
                 TrailPoint { p: [th.cos(), th.sin()], age: 0.1 * (1.0 - i as f32 / n as f32), s: th as f64 }
             })
             .collect();
-        turning_ages(&circle, budget, &mut ages);
-        assert_eq!(ages[n], 0.0);
-        let half = n - 3 * n / 8; // three quarters of a loop back
-        assert!((ages[half] - 0.5).abs() < 0.03, "{}", ages[half]);
-        assert_eq!(ages[n / 4 - 3], 1.0); // just over a loop and a half back
+        let reach = turning_reach(&circle, budget);
+        assert!((reach - 0.075).abs() < 0.001, "{reach}");
+    }
+
+    #[test]
+    fn stardust_shrinks_gradually_and_grows_with_the_trail() {
+        // a slingshot moves the cut from the whole trail to a fifth of it
+        let mut shown = 1.0;
+        let mut t = 0.0;
+        while shown > 0.2 + 1e-4 {
+            let before = shown;
+            shown = ease_reach(shown, 0.2, 1.0 / 60.0);
+            assert!(before - shown <= DUST_RETRACT / 60.0 + 1e-6);
+            t += 1.0 / 60.0;
+            assert!(t < 10.0);
+        }
+        assert!(t > 0.8 / DUST_RETRACT, "took {t} s");
+        // growing back follows the trail at once
+        assert_eq!(ease_reach(0.2, 0.25, 1.0 / 60.0), 0.25);
     }
 }
