@@ -79,17 +79,16 @@ included.
 
 | output | trails | frame time | CPU (one core) |
 |---|---|---|---|
-| Ghostty pane, 1280×800 at 30 fps | smoke | 4.9 ms | 6% |
-| Ghostty pane, 1280×800 at 30 fps | stardust | 3.5 ms | 6% |
-| full screen, 2880×1800 at 60 fps | smoke | 9.4 ms | 5% |
-| full screen, 2880×1800 at 60 fps | stardust | 3.9 ms | 7% |
-| full screen, 2880×1800 at 60 fps | lines | 4.0 ms | 5% |
+| Ghostty pane, 1280×800 at 30 fps | smoke | 3.9 ms | 6% |
+| Ghostty pane, 1280×800 at 30 fps | stardust | 3.3 ms | 6% |
+| full screen, 2880×1800 at 60 fps | smoke | 6.4 ms | 6% |
+| full screen, 2880×1800 at 60 fps | stardust | 3.7 ms | 6% |
+| full screen, 2880×1800 at 60 fps | lines | 4.1 ms | 5% |
 
 Power, measured with the SoC's own reading: with lines, a pane added about 0.1 W (within the
 noise) and full screen about 0.7 W (about 1.2 W at the battery; the whole laptop drew 7–8 W at
-idle). Smoke and stardust have not been power-measured since their latest rework. The smoke
-is the expensive style for now: it is drawn at full resolution, with overlapping plumes around
-every segment, which leaves room to optimise. Measure your own setup with e.g.
+idle). Smoke and stardust have not been power-measured since their latest rework; smoke is
+still the most expensive style. Measure your own setup with e.g.
 `moirai --term --dry-run 20 --size 1280x800` or `moirai --dry-run 20 --size 2880x1800`.
 
 ### As a screensaver (GNOME)
@@ -120,16 +119,18 @@ data/                the stable-orbit catalogue
   overdraw), and the timeline records how far every body has travelled, so effects can be
   pinned to places on the path. Segments always end at fixed places on the path, so they stay
   the same from frame to frame as the trail slides along. Smoke is shaded per pixel in path
-  coordinates (distance along and across the path, at the same scale both ways so that
-  features are round, not streaked) from a small tileable 3D noise texture made at start-up:
-  its eddies grow with the plume, which swells into puffs and narrows between them, streams
-  back from the body, meanders and churns slowly in time. Lines and smoke use *max* blending
-  (no beads at the joints, no blur passes). Stardust motes are seeded by their place on the
-  path, so each is the same mote in every frame without particle state; motes smaller than a
-  pixel are drawn a pixel wide and correspondingly fainter, which keeps them steady. They fade
-  out by how far the path has turned as well as by time. The starfield is drawn once per
-  window size. One composite pass adds background, stars, trails and bodies, filmic tone
-  mapping and dithering.
+  coordinates (distance along and across the path, at the same scale both ways so that features
+  are round, not streaked) from a small tileable 3D noise texture made at start-up: its eddies
+  grow with the plume, which swells into puffs and narrows between them, streams back from the
+  body, meanders and churns slowly in time. The young smoke, with its fine detail, is drawn at
+  full resolution and the older, wider and softer smoke at half resolution. Each segment's
+  plume reaches past its ends only as far as the bend there needs rather than a full plume
+  width, so far fewer pixels are shaded twice. Lines and smoke use *max* blending (no beads at
+  the joints, no blur passes). Stardust motes are seeded by their place on the path, so each is
+  the same mote in every frame without particle state; motes smaller than a pixel are drawn a
+  pixel wide and correspondingly fainter, which keeps them steady. They fade out by how far the
+  path has turned as well as by time. The starfield is drawn once per window size. One
+  composite pass adds background, stars, trails and bodies, filmic tone mapping and dithering.
 
 `cargo test --release` covers orbit closure and conservation, bit-identical restarts,
 conservation-preserving nudges, steered runs replaying cleanly, the real-time timeline, and the
