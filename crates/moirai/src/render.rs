@@ -265,9 +265,9 @@ const SMOKE_W0: f32 = 0.0025;
 const SMOKE_W1: f32 = 0.020;
 const SMOKE_DRIFT: f32 = 0.014;
 const SMOKE_FLOW: f32 = 0.03;
-/// The smoke is drawn at 1/SMOKE_DIV of the frame's resolution (2 halves its cost; fine
-/// detail near the body is lost first).
-const SMOKE_DIV: u32 = 1;
+/// The smoke's older, softer part is drawn at 1/SMOKE_FAR_DIV of the frame's resolution (the
+/// young part, with its fine detail, at full resolution; see the shader for where they meet).
+const SMOKE_FAR_DIV: u32 = 2;
 /// The crisp hot filament under the smoke fades out over this share of the trail, and the soft
 /// glow under the stardust over this one (the oldest motes sparkle on their own).
 const SMOKE_CORE_SPAN: f32 = 0.25;
@@ -321,7 +321,9 @@ impl<T: Pod> Instances<T> {
 /// Size-dependent render targets and the composite bind group that reads them.
 struct Targets {
     trail: wgpu::TextureView,
-    smoke: wgpu::TextureView,
+    /// Young smoke at full resolution, older smoke at a lower one.
+    smoke_near: wgpu::TextureView,
+    smoke_far: wgpu::TextureView,
     stars: wgpu::TextureView,
     comp_bg: wgpu::BindGroup,
 }
@@ -333,7 +335,8 @@ pub struct Renderer {
     globals: wgpu::Buffer,
     line_pipeline: wgpu::RenderPipeline,
     dust_pipeline: wgpu::RenderPipeline,
-    smoke_pipeline: wgpu::RenderPipeline,
+    smoke_near_pipeline: wgpu::RenderPipeline,
+    smoke_far_pipeline: wgpu::RenderPipeline,
     star_pipeline: wgpu::RenderPipeline,
     comp_pipeline: wgpu::RenderPipeline,
     globals_bg: wgpu::BindGroup,
@@ -765,6 +768,7 @@ impl Renderer {
                 texture_entry(2, wgpu::TextureViewDimension::D2, false),
                 texture_entry(3, wgpu::TextureViewDimension::D2, true),
                 sampler_entry(4),
+                texture_entry(5, wgpu::TextureViewDimension::D2, true),
             ],
         });
         let layout = |label: &str, groups: &[Option<&wgpu::BindGroupLayout>]| {
@@ -792,17 +796,21 @@ impl Renderer {
             TRAIL_FORMAT,
             wgpu::BlendOperation::Max,
         );
-        let smoke_pipeline = instanced_pipeline(
-            dev,
-            &module,
-            &smoke_layout,
-            "smoke pipeline",
-            ("vs_smoke", "fs_smoke"),
-            std::mem::size_of::<Seg>(),
-            &seg_attrs,
-            TRAIL_FORMAT,
-            wgpu::BlendOperation::Max,
-        );
+        let smoke_pipeline = |label: &str, entry: (&str, &str)| {
+            instanced_pipeline(
+                dev,
+                &module,
+                &smoke_layout,
+                label,
+                entry,
+                std::mem::size_of::<Seg>(),
+                &seg_attrs,
+                TRAIL_FORMAT,
+                wgpu::BlendOperation::Max,
+            )
+        };
+        let smoke_near_pipeline = smoke_pipeline("smoke near pipeline", ("vs_smoke_near", "fs_smoke_near"));
+        let smoke_far_pipeline = smoke_pipeline("smoke far pipeline", ("vs_smoke_far", "fs_smoke_far"));
         let dust_pipeline = instanced_pipeline(
             dev,
             &module,
@@ -862,7 +870,8 @@ impl Renderer {
             globals,
             line_pipeline,
             dust_pipeline,
-            smoke_pipeline,
+            smoke_near_pipeline,
+            smoke_far_pipeline,
             star_pipeline,
             comp_pipeline,
             globals_bg,
@@ -889,8 +898,10 @@ impl Renderer {
         height: u32,
     ) -> Targets {
         let trail = hdr_texture(dev, "trail intensity", TRAIL_FORMAT, width, height);
-        // upsampled with bilinear filtering in the composite when drawn at a lower resolution
-        let smoke = hdr_texture(dev, "smoke intensity", TRAIL_FORMAT, width.div_ceil(SMOKE_DIV), height.div_ceil(SMOKE_DIV));
+        let smoke_near = hdr_texture(dev, "smoke near", TRAIL_FORMAT, width, height);
+        // upsampled with bilinear filtering in the composite
+        let (fw, fh) = (width.div_ceil(SMOKE_FAR_DIV), height.div_ceil(SMOKE_FAR_DIV));
+        let smoke_far = hdr_texture(dev, "smoke far", TRAIL_FORMAT, fw, fh);
         let stars = hdr_texture(dev, "starfield", STAR_FORMAT, width, height);
         let comp_bg = dev.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite bg"),
@@ -899,11 +910,12 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&trail) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&stars) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&smoke) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&smoke_near) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(smoke_sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&smoke_far) },
             ],
         });
-        Targets { trail, smoke, stars, comp_bg }
+        Targets { trail, smoke_near, smoke_far, stars, comp_bg }
     }
 
     pub fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) {
@@ -1052,10 +1064,15 @@ impl Renderer {
             self.motes.draw(&mut pass, &self.dust_pipeline);
         }
         if style == TrailStyle::Smoke {
-            let mut pass = begin(encoder, "smoke", &self.targets.smoke);
-            pass.set_bind_group(0, &self.globals_bg, &[]);
-            pass.set_bind_group(1, &self.noise_bg, &[]);
-            self.segs.draw(&mut pass, &self.smoke_pipeline);
+            for (label, target, pipeline) in [
+                ("smoke near", &self.targets.smoke_near, &self.smoke_near_pipeline),
+                ("smoke far", &self.targets.smoke_far, &self.smoke_far_pipeline),
+            ] {
+                let mut pass = begin(encoder, label, target);
+                pass.set_bind_group(0, &self.globals_bg, &[]);
+                pass.set_bind_group(1, &self.noise_bg, &[]);
+                self.segs.draw(&mut pass, pipeline);
+            }
         }
         {
             let mut pass = begin(encoder, "composite", target);

@@ -199,8 +199,44 @@ struct SmokeOut {
     @location(5) @interpolate(flat) body: u32,
 };
 
+// Smoke is drawn in two layers: the young part, with its fine detail, at full resolution, and the
+// older, softer and much wider part at half resolution (a quarter of the pixels to shade). They
+// overlap over a stretch of the trail where one fades in and the other fades out.
+const SMOKE_FAR_IN: f32 = 0.15;   // the half-resolution layer starts here...
+const SMOKE_FAR_FULL: f32 = 0.25; // ...and is complete from here on
+const SMOKE_NEAR_END: f32 = 0.4;  // the full-resolution layer has faded out by here
+
+const OFFSCREEN: vec4<f32> = vec4<f32>(2.0, 2.0, 0.0, 1.0); // outside the clip volume: nothing is drawn
+
 @vertex
-fn vs_smoke(@builtin(vertex_index) vi: u32, s: Seg) -> SmokeOut {
+fn vs_smoke_near(@builtin(vertex_index) vi: u32, s: Seg) -> SmokeOut {
+    var o = smoke_vertex(vi, s);
+    if (min(s.ages.x, s.ages.y) >= SMOKE_NEAR_END) {
+        o.pos = OFFSCREEN;
+    }
+    return o;
+}
+
+@vertex
+fn vs_smoke_far(@builtin(vertex_index) vi: u32, s: Seg) -> SmokeOut {
+    var o = smoke_vertex(vi, s);
+    if (max(s.ages.x, s.ages.y) < SMOKE_FAR_IN) {
+        o.pos = OFFSCREEN;
+    }
+    return o;
+}
+
+@fragment
+fn fs_smoke_near(i: SmokeOut) -> @location(0) vec4<f32> {
+    return smoke(i, true);
+}
+
+@fragment
+fn fs_smoke_far(i: SmokeOut) -> @location(0) vec4<f32> {
+    return smoke(i, false);
+}
+
+fn smoke_vertex(vi: u32, s: Seg) -> SmokeOut {
     let a = to_px(s.p0);
     let b = to_px(s.p1);
     let age = max(s.ages.x, s.ages.y);
@@ -221,8 +257,8 @@ fn vs_smoke(@builtin(vertex_index) vi: u32, s: Seg) -> SmokeOut {
     return o;
 }
 
-@fragment
-fn fs_smoke(i: SmokeOut) -> @location(0) vec4<f32> {
+// The smoke at this pixel for the near (full resolution) or far (half resolution) layer.
+fn smoke(i: SmokeOut, near: bool) -> vec4<f32> {
     // Coordinates pinned to the path: u along it (in noise periods) and the distance across it
     // (px), sampled at the same scale both ways so that every feature is round, not streaked.
     // Every along-path frequency is a multiple of 1/4: the CPU rebases u by multiples of 4.
@@ -233,8 +269,12 @@ fn fs_smoke(i: SmokeOut) -> @location(0) vec4<f32> {
     let proj = dot(rel, dir);
     let t = clamp(proj / len, 0.0, 1.0);
     let age = mix(i.ages.x, i.ages.y, t);
-    if (age >= 1.0) {
+    if (age >= 1.0 || (near && age >= SMOKE_NEAR_END) || (!near && age < SMOKE_FAR_IN)) {
         discard;
+    }
+    var layer = smoothstep(SMOKE_FAR_IN, SMOKE_FAR_FULL, age);
+    if (near) {
+        layer = 1.0 - smoothstep(SMOKE_FAR_FULL, SMOKE_NEAR_END, age);
     }
     let beyond = proj - t * len; // px past either end of the segment
     let u = (mix(i.s.x, i.s.y, t) + beyond / g.scale) * g.smoke_freq;
@@ -289,7 +329,7 @@ fn fs_smoke(i: SmokeOut) -> @location(0) vec4<f32> {
     let life = 1.0 - age;
     let thin = pow(g.smoke_w0 / w, 0.5);
     let light = g.smoke_gain * (dens + halo) * edge * life * life * thin;
-    return body_channel(i.body, light, g.smoke_hot * dens * edge * exp(-5.0 * age));
+    return body_channel(i.body, light * layer, g.smoke_hot * dens * edge * exp(-5.0 * age) * layer);
 }
 
 // ---------------------------------------------------------------- stardust
@@ -424,8 +464,9 @@ fn fs_star(i: StarOut) -> @location(0) vec4<f32> {
 
 @group(0) @binding(1) var trail_tex: texture_2d<f32>;
 @group(0) @binding(2) var star_tex: texture_2d<f32>;
-@group(0) @binding(3) var smoke_tex: texture_2d<f32>;
+@group(0) @binding(3) var smoke_near_tex: texture_2d<f32>;
 @group(0) @binding(4) var smoke_smp: sampler;
+@group(0) @binding(5) var smoke_far_tex: texture_2d<f32>;
 
 @vertex
 fn vs_full(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -467,7 +508,10 @@ fn fs_comp(@builtin(position) fc: vec4<f32>) -> @location(0) vec4<f32> {
     }
     var fg = trail_light(textureLoad(trail_tex, ip, 0));
     if (g.smoke_on > 0.5) {
-        fg += trail_light(textureSampleLevel(smoke_tex, smoke_smp, px / g.size, 0.0));
+        // the layers combine like overlapping smoke within one: the brighter wins
+        let near = textureLoad(smoke_near_tex, ip, 0);
+        let far = textureSampleLevel(smoke_far_tex, smoke_smp, px / g.size, 0.0);
+        fg += trail_light(max(near, far));
     }
     for (var k = 0; k < 3; k++) {
         let bp = to_px(g.bodies[k].xy);
