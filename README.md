@@ -67,14 +67,15 @@ See `moirai --help` for all options, `moirai --list` for the choreographies, and
   glow is smaller, so that it does not hide a planet close to its sun.
 
   A readout in the top-right corner tells its story. The era is **stable** while the planet is
-  bound to one sun and the others barely disturb it, and **chaotic** otherwise; below it, which
-  era of which planet this is and whether its civilisation lives. A graph shows the surface
-  temperature over the last half minute on a log scale (10 K to 10,000 K), with the band where a
-  civilisation can live, the eras shaded along the time axis, and a line where one planet was
-  lost and the next began. The temperature comes from the three suns' light, with some thermal
-  inertia, and tints the planet. A civilisation perishes when the seas boil (400 K) or freeze
-  solid (180 K); the planet carries on, and a new civilisation rises once the climate has stayed
-  mild for a few planet years.
+  bound to one sun, the others barely disturb it and it is neither boiling nor frozen (180 to
+  400 K), and **chaotic** otherwise; below it, which era of which planet this is and whether its
+  civilisation lives. A graph shows the surface temperature over the last half minute on a log
+  scale (10 K to 10,000 K), with the band where a civilisation can live, the eras shaded along
+  the time axis, and a line where one planet was lost and the next began. The temperature comes
+  from the three suns' light; the surface responds within a couple of months, like Earth's
+  oceans, so an elliptical orbit has seasons. It also tints the planet. A civilisation perishes
+  when the seas boil (400 K) or freeze solid (180 K) for more than a season; the planet carries
+  on, and a new civilisation rises once the climate has stayed mild for a few planet years.
 
 ### In a Ghostty split
 

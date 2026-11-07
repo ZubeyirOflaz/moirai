@@ -8,8 +8,9 @@
 //! habitable zone of the star farthest from the other two.
 //!
 //! Along the way it keeps a chronicle: its surface temperature (the suns' light, with thermal
-//! inertia), whether it lives through a stable or a chaotic era, and its civilisations, which
-//! perish when the seas boil or freeze and rise again once the climate has been mild for a while.
+//! inertia), whether it lives through a stable era (calm around one sun, and neither boiling nor
+//! frozen) or a chaotic one, and its civilisations, which perish when the seas boil or freeze and
+//! rise again once the climate has been mild for a while.
 
 use std::collections::VecDeque;
 use std::f64::consts::TAU;
@@ -32,23 +33,31 @@ pub const EJECT_SPREAD: f64 = 2.0;
 /// Surface temperature in a sun's habitable zone with the other suns far away (K): Earth's.
 pub const HZ_TEMP: f64 = 288.0;
 /// How quickly the surface follows the suns' light: its radiated energy (T^4) relaxes toward
-/// the received with this time constant (time units; a year in the habitable zone is about 0.26).
+/// the received with this time constant (time units). A year in the habitable zone is about
+/// 0.26, so this is a couple of months, like Earth's oceans: an elliptical orbit has seasons.
 /// It heats up quickly and cools down slowly.
-const THERMAL_TIME: f64 = 0.3;
+const THERMAL_TIME: f64 = 0.05;
+/// The climate: the surface temperature averaged the same way over about a year, which decides
+/// whether a new civilisation can rise (`MILD`) and whether a planet is caught in a scorching
+/// orbit (`SCORCH_TEMP`), whatever its seasons.
+const CLIMATE_TIME: f64 = 0.3;
 /// Calm: bound to the nearest sun, whose pull the other suns' tides disturb by less than this share.
 const CALM_TIDE: f64 = 0.05;
-/// A stable era begins once it has been calm this long (time units: about two planet years) and
-/// ends after unrest this long.
+/// A stable era needs calm and a climate a civilisation can live in (between `CIV_COLD` and
+/// `CIV_HOT`). It begins once both have held this long (time units: about two planet years) and
+/// ends once either has failed this long.
 const ERA_SETTLE: f64 = 0.6;
 const ERA_BREAK: f64 = 0.12;
-/// A civilisation perishes when the surface gets this hot (the seas boil) or this cold (they
-/// freeze solid), in K ...
+/// A civilisation perishes when the surface stays this hot (the seas boil) or this cold (they
+/// freeze solid), in K, for `CIV_ENDURE` (a season's spike is survived) ...
 pub const CIV_HOT: f64 = 400.0;
 pub const CIV_COLD: f64 = 180.0;
-/// ... and a new one rises once the climate has stayed mild (between these, K) this long.
+const CIV_ENDURE: f64 = 0.1;
+/// ... and a new one rises once the climate (the yearly average) has stayed mild (between
+/// these, K) this long.
 pub const MILD: (f64, f64) = (250.0, 330.0);
 const CIV_RISE: f64 = 1.5;
-/// A planet whose surface stays this hot (K) for this long (time units) has been caught in a
+/// A planet whose climate stays this hot (K) for this long (time units) has been caught in a
 /// scorching orbit close to its sun, lost in its glare: its run ends. Brief passes this hot, even
 /// far hotter, are survived.
 pub const SCORCH_TEMP: f64 = 700.0;
@@ -94,16 +103,30 @@ pub struct Story {
     era: u32,
     civilisation: u32,
     alive: bool,
+    /// The climate (see `CLIMATE_TIME`).
+    climate: f64,
     unrest: f64,
     mild: f64,
-    /// How long it has been scorching hot without a break.
+    /// How long the surface has been deadly hot or cold, and the climate scorching, without a break.
+    extreme: f64,
     scorching: f64,
 }
 
 impl Story {
     /// A new planet: a stable era and a civilisation from the start.
     fn new(temp: f64) -> Self {
-        Self { temp, stable: true, era: 1, civilisation: 1, alive: true, unrest: 0.0, mild: 0.0, scorching: 0.0 }
+        Self {
+            temp,
+            stable: true,
+            era: 1,
+            civilisation: 1,
+            alive: true,
+            climate: temp,
+            unrest: 0.0,
+            mild: 0.0,
+            extreme: 0.0,
+            scorching: 0.0,
+        }
     }
 
     /// Whether it has been scorching hot for so long that the planet is lost to its sun.
@@ -124,11 +147,18 @@ impl Story {
     /// Live through `h` more time units at equilibrium temperature `teq`, calm or not. Returns
     /// whether the era or the civilisation changed.
     fn advance(&mut self, h: f64, teq: f64, calm: bool) -> bool {
-        let (u, ueq) = (self.temp.powi(4), teq.powi(4));
-        self.temp = (ueq + (u - ueq) * (-h / THERMAL_TIME).exp()).powf(0.25);
-        self.scorching = if self.temp >= SCORCH_TEMP { self.scorching + h } else { 0.0 };
+        let relax = |t: f64, time: f64| {
+            let (u, ueq) = (t.powi(4), teq.powi(4));
+            (ueq + (u - ueq) * (-h / time).exp()).powf(0.25)
+        };
+        self.temp = relax(self.temp, THERMAL_TIME);
+        self.climate = relax(self.climate, CLIMATE_TIME);
+        self.scorching = if self.climate >= SCORCH_TEMP { self.scorching + h } else { 0.0 };
+        let livable = self.temp > CIV_COLD && self.temp < CIV_HOT;
+        self.extreme = if livable { 0.0 } else { self.extreme + h };
         let mut changed = false;
-        self.unrest = if calm == self.stable { 0.0 } else { self.unrest + h };
+        let settled = calm && livable;
+        self.unrest = if settled == self.stable { 0.0 } else { self.unrest + h };
         if self.unrest >= if self.stable { ERA_BREAK } else { ERA_SETTLE } {
             self.stable = !self.stable;
             self.era += 1;
@@ -136,13 +166,13 @@ impl Story {
             changed = true;
         }
         if self.alive {
-            if self.temp >= CIV_HOT || self.temp <= CIV_COLD {
+            if self.extreme >= CIV_ENDURE {
                 self.alive = false;
                 self.mild = 0.0;
                 changed = true;
             }
         } else {
-            self.mild = if (MILD.0..=MILD.1).contains(&self.temp) { self.mild + h } else { 0.0 };
+            self.mild = if (MILD.0..=MILD.1).contains(&self.climate) { self.mild + h } else { 0.0 };
             if self.mild >= CIV_RISE {
                 self.alive = true;
                 self.civilisation += 1;
@@ -468,11 +498,12 @@ mod tests {
             story.advance(h, HZ_TEMP, false);
         }
         assert_eq!((story.stable, story.era), (false, 2));
-        // two suns overhead: the seas boil and the civilisation perishes
+        // two suns overhead: the seas boil and, once that has lasted a little while, the
+        // civilisation perishes
         while story.alive {
             story.advance(h, 2500.0, false);
         }
-        assert!(story.temp >= CIV_HOT);
+        assert!(story.temp >= CIV_HOT && story.extreme >= CIV_ENDURE);
         // calm and mild again for long enough: a new stable era and a new civilisation
         for _ in 0..1000 {
             story.advance(h, HZ_TEMP, true);
@@ -483,9 +514,39 @@ mod tests {
         // heat comes fast, cold slowly
         let mut warm = Story::new(HZ_TEMP);
         let mut cool = Story::new(HZ_TEMP);
-        warm.advance(0.1, 600.0, true);
-        cool.advance(0.1, 100.0, true);
+        warm.advance(0.02, 600.0, true);
+        cool.advance(0.02, 100.0, true);
         assert!(warm.temp - HZ_TEMP > HZ_TEMP - cool.temp);
+        // calm but scorching is no stable era, and a season's spike is no catastrophe
+        let mut hot = Story::new(HZ_TEMP);
+        for _ in 0..100 {
+            hot.advance(h, 900.0, true);
+        }
+        assert!(!hot.stable && !hot.alive);
+        // a hot season near perihelion: briefly over 400 K, no lasting harm
+        let mut season = Story::new(HZ_TEMP);
+        season.advance(0.02, 600.0, true);
+        assert!(season.temp > CIV_HOT);
+        for _ in 0..50 {
+            season.advance(h, HZ_TEMP, true);
+        }
+        assert!(season.stable && season.alive, "{season:?}");
+    }
+
+    #[test]
+    fn an_elliptical_orbit_has_seasons() {
+        let (model, y0) = lonely_star();
+        let mut sim = PlanetSim::new(8);
+        // aphelion 0.19 from the star, perihelion about 0.05
+        let r: f64 = 0.19;
+        let speed = (0.4 / r).sqrt();
+        let start = Planet { p: [r, 0.0], v: [0.0, speed], run: 0, story: Story::new(HZ_TEMP) };
+        sim.body = Some(start);
+        sim.samples.push_back(PlanetSample::of(0.0, &start, None));
+        run(&model, y0, 0.4 * REV, &mut sim);
+        let temps: Vec<f32> = sim.samples.iter().skip(sim.samples.len() / 3).map(|s| s.chronicle.temp).collect();
+        let (lo, hi) = temps.iter().fold((f32::MAX, 0.0f32), |(lo, hi), &t| (lo.min(t), hi.max(t)));
+        assert!(hi / lo > 1.4, "seasons from {lo} to {hi} K");
     }
 
     #[test]

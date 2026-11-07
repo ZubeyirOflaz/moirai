@@ -107,9 +107,10 @@ const DANCE_RADIUS: f64 = 1.6;
 /// Length of the planet's trail in time units: about two orbits in the habitable zone.
 const PLANET_TRAIL: f64 = 0.6;
 /// How far back the readout's temperature graph reaches (time units; about 36 s on screen with
-/// the planet shown at the default speed), and about how many points it is drawn from.
+/// the planet shown at the default speed), and how many slices it is drawn from: each keeps its
+/// coldest and hottest moment, so seasons a few slices long still show as swings.
 const HISTORY: f64 = 3.0 * REV;
-const HISTORY_POINTS: usize = 160;
+const HISTORY_SLICES: usize = 300;
 
 /// Storage for the paths a frame draws, reused from frame to frame.
 #[derive(Default)]
@@ -123,23 +124,38 @@ pub struct Paths {
 /// circles its sun several times a second and its orbit is hard to follow.
 pub const PLANET_PACE: f64 = 0.5;
 
-/// The planet's temperature over the `HISTORY` before `t`, thinned to about `HISTORY_POINTS`
-/// points but keeping every change of planet, into `out` (oldest first), ending with `now`.
+/// The planet's temperature over the `HISTORY` before `t`, into `out` (oldest first), ending
+/// with `now`: from every slice of `HISTORY / HISTORY_SLICES` its coldest and hottest moment, in
+/// the order they happened, and never a slice spanning two planets.
 fn planet_history(samples: &VecDeque<PlanetSample>, t: f64, now: &PlanetSample, out: &mut Vec<HistoryPoint>) {
     out.clear();
     let t0 = t - HISTORY;
-    let step = HISTORY / HISTORY_POINTS as f64;
-    let mut next = t0;
-    let mut prev_run = None;
+    let x = |s: &PlanetSample| ((s.t - t0) / HISTORY) as f32;
+    let flush = |out: &mut Vec<HistoryPoint>, lo: Option<&PlanetSample>, hi: Option<&PlanetSample>| {
+        if let (Some(lo), Some(hi)) = (lo, hi) {
+            let (a, b) = if lo.t <= hi.t { (lo, hi) } else { (hi, lo) };
+            out.push(HistoryPoint::of(x(a), a));
+            if b.t > a.t {
+                out.push(HistoryPoint::of(x(b), b));
+            }
+        }
+    };
+    let (mut slice, mut lo, mut hi): (Option<usize>, Option<&PlanetSample>, Option<&PlanetSample>) = (None, None, None);
     let start = samples.partition_point(|s| s.t < t0);
     for s in samples.iter().skip(start).take_while(|s| s.t < t) {
-        let boundary = s.fate.is_some() || prev_run.is_some_and(|r| r != s.run);
-        if s.t >= next || boundary {
-            out.push(HistoryPoint::of(((s.t - t0) / HISTORY) as f32, s));
-            next = s.t + step;
+        let k = (x(s) * HISTORY_SLICES as f32) as usize;
+        if slice != Some(k) || lo.is_some_and(|l| l.run != s.run) {
+            flush(out, lo, hi);
+            (slice, lo, hi) = (Some(k), Some(s), Some(s));
         }
-        prev_run = Some(s.run);
+        if lo.is_none_or(|l| s.chronicle.temp < l.chronicle.temp) {
+            lo = Some(s);
+        }
+        if hi.is_none_or(|h| s.chronicle.temp > h.chronicle.temp) {
+            hi = Some(s);
+        }
     }
+    flush(out, lo, hi);
     out.push(HistoryPoint::of(1.0, now));
 }
 
