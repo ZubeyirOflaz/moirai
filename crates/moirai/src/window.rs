@@ -85,7 +85,7 @@ impl App {
             _ => return,
         };
         let now = Instant::now();
-        engine.update((now - self.last).as_secs_f64().min(0.25));
+        engine.update((now - self.last).as_secs_f64().min(0.25), self.opts.look);
         self.last = now;
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let input = engine.frame(self.opts.look);

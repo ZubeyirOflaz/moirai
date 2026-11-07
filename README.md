@@ -62,7 +62,8 @@ See `moirai --help` for all options, `moirai --list` for the choreographies, and
   into a sun or is flung out of the system, the next planet starts the same way, so one system
   shows many planetary histories. Most last a few to a few dozen seconds; `moirai
   --planet-stats 20` simulates twenty scenes and reports how long their planets lasted. While
-  it is shown, the suns' glow is smaller, so that it does not hide a planet close to its sun.
+  it is shown the scene runs at half speed, so that its orbit can be followed, and the suns'
+  glow is smaller, so that it does not hide a planet close to its sun.
 
 ### In a Ghostty split
 

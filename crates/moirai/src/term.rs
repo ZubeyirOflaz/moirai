@@ -570,7 +570,7 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
             transport.resize((geo.width * geo.height * 4) as usize)?;
             out.write_all(b"\x1b_Ga=d,d=A,q=2\x1b\\\x1b[2J").map_err(io_err)?;
         }
-        engine.update((now - last).as_secs_f64());
+        engine.update((now - last).as_secs_f64(), look);
         last = now;
 
         // ids 1 and 2 alternate: show the new image, then delete the previous one
@@ -623,7 +623,7 @@ pub fn dry_run(
     let mut last = Instant::now();
     while t0.elapsed().as_secs_f64() < seconds {
         let start = Instant::now();
-        engine.update((start - last).as_secs_f64());
+        engine.update((start - last).as_secs_f64(), look);
         last = start;
         let frame = engine.frame(look);
         let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });

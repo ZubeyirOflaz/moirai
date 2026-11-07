@@ -7,7 +7,7 @@ mod window;
 
 use std::process::ExitCode;
 
-use engine::{EngineConfig, SceneRequest, planet_runs, snapshot_scene, still_frame};
+use engine::{EngineConfig, PLANET_PACE, SceneRequest, planet_runs, snapshot_scene, still_frame};
 use moirai_core::library::catalog;
 use moirai_core::scene::DirectorConfig;
 use render::{Gpu, Look, OFFSCREEN_FORMAT, Offscreen, PALETTES, Renderer, TrailStyle, instance, palette_index};
@@ -39,7 +39,8 @@ OPTIONS
                        others:   PALETTES_OTHER
   --stars F            starfield brightness (default 1; 0 or --no-stars: plain background)
   --planet             show the planet: a massless world in the habitable zone of one sun,
-                       replaced by a new one when it hits a star or leaves the system
+                       replaced by a new one when it hits a star or leaves the system (the
+                       scene runs at half speed while it is shown)
   --planet-stats N     simulate N scenes without showing anything and report how long their
                        planets lasted
   --fps N              frame rate (default 60 in a window, 30 in a terminal)
@@ -163,7 +164,9 @@ fn snapshot(a: &Args, path: &str) -> Result<(), String> {
     let gpu = Gpu::new(instance(), None)?;
     let (w, h) = a.size;
     let fps = a.fps.unwrap_or(30.0);
-    let revs_per_frame = 1.0 / (fps * a.seconds_per_rev);
+    // with the planet shown the scene runs slower, as it does live
+    let seconds_per_rev = a.seconds_per_rev / if a.look.planet { PLANET_PACE } else { 1.0 };
+    let revs_per_frame = 1.0 / (fps * seconds_per_rev);
     let last = a.at + (a.frames - 1) as f64 * revs_per_frame;
     let (scene, _) = snapshot_scene(a.scene, a.seed, last);
     let mut renderer = Renderer::new(&gpu, OFFSCREEN_FORMAT, w, h);
@@ -173,7 +176,7 @@ fn snapshot(a: &Args, path: &str) -> Result<(), String> {
     let mut px = vec![0u8; (w * h * 4) as usize];
     for i in 0..a.frames {
         let revs = a.at + i as f64 * revs_per_frame;
-        let time = (revs * a.seconds_per_rev) as f32;
+        let time = (revs * seconds_per_rev) as f32;
         let input = still_frame(&scene, revs * moirai_core::REV, &mut trails, &mut planet_path, a.look, a.palettes, time);
         let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("snapshot") });
         renderer.render(&gpu, &mut enc, &off.view, &input);
@@ -226,11 +229,10 @@ fn planet_stats(a: &Args, count: usize) -> Result<(), String> {
     }
     let m = median(&mut all);
     println!(
-        "\nall {count} scenes: {} planets, median lifetime {m:.1} rev ({:.0} s at {} s per rev); {ejected} ejected, \
-         {swallowed} swallowed, {survived} lasted to the end of their scene",
+        "\nall {count} scenes: {} planets, median lifetime {m:.1} rev ({:.0} s on screen, where the planet slows the \
+         scene down); {ejected} ejected, {swallowed} swallowed, {survived} lasted to the end of their scene",
         all.len(),
-        m * a.seconds_per_rev,
-        a.seconds_per_rev
+        m * a.seconds_per_rev / PLANET_PACE,
     );
     Ok(())
 }

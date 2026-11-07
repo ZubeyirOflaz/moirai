@@ -104,8 +104,12 @@ pub fn palette_rotation(mask: u32) -> Vec<usize> {
 /// Framing radius a free dance is designed around (its camera follows the motion).
 const DANCE_RADIUS: f64 = 1.6;
 
-/// Length of the planet's trail in time units: about two orbits in the habitable zone.
-const PLANET_TRAIL: f64 = 0.45;
+/// Length of the planet's trail in time units: four to five orbits in the habitable zone.
+const PLANET_TRAIL: f64 = 1.2;
+
+/// With the planet shown the scene runs at this share of its normal speed: otherwise the planet
+/// circles its sun several times a second and its orbit is hard to follow.
+pub const PLANET_PACE: f64 = 0.5;
 
 /// The planet's recent path up to `t` (of its current run only), oldest first, into `out`, and
 /// where it is at `t`.
@@ -203,6 +207,8 @@ pub struct Engine {
     radius_target: f64,
     pub paused: bool,
     rotation: Vec<usize>,
+    /// Share of the configured speed the scene runs at (eases toward 1 or `PLANET_PACE`).
+    pace: f64,
     /// Palette steps taken with the cycle key in the current scene.
     palette_shift: usize,
     trails: [Vec<TrailPoint>; 3],
@@ -238,6 +244,7 @@ impl Engine {
             radius_target: radius,
             paused: false,
             rotation: palette_rotation(cfg.palettes),
+            pace: 1.0,
             palette_shift: 0,
             trails: Default::default(),
             bodies: [[0.0; 2]; 3],
@@ -260,7 +267,7 @@ impl Engine {
     }
 
     fn speed(&self) -> f64 {
-        REV / self.cfg.seconds_per_rev
+        REV / self.cfg.seconds_per_rev * self.pace
     }
 
     /// Fade out and move on to the next scene.
@@ -272,9 +279,11 @@ impl Engine {
         }
     }
 
-    /// Advance the clock by `dt` seconds of wall time.
-    pub fn update(&mut self, dt: f64) {
+    /// Advance the clock by `dt` seconds of wall time, at the pace `look` calls for.
+    pub fn update(&mut self, dt: f64, look: Look) {
         self.elapsed += dt;
+        let pace = if look.planet { PLANET_PACE } else { 1.0 };
+        self.pace += (pace - self.pace) * (1.0 - (-dt / 0.4).exp()); // eased over about a second
         if !self.paused {
             let end = self.current.end.load();
             let frontier = self.current.frontier.load();

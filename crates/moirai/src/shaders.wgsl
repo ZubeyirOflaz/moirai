@@ -434,13 +434,13 @@ struct PlanetOut {
     @location(3) @interpolate(flat) ages: vec2<f32>,
 };
 
-// The planet's trail is a finer thread than the suns'.
+// The planet's trail is a hairline, far finer than the suns' threads.
 fn planet_core_px() -> f32 {
-    return max(0.6 * g.core_px, 0.8);
+    return max(0.35 * g.core_px, 0.5);
 }
 
 fn planet_glow_px() -> f32 {
-    return max(0.45 * g.glow_px, 1.5);
+    return max(0.25 * g.glow_px, 1.2);
 }
 
 @vertex
@@ -468,11 +468,11 @@ fn fs_planet(i: PlanetOut) -> @location(0) vec4<f32> {
         discard;
     }
     let fade = life * life * (3.0 - 2.0 * life);
-    let w = planet_core_px() * (0.4 + 0.6 * life);
+    let w = planet_core_px() * (0.5 + 0.5 * life);
     let core = 1.0 - smoothstep(w - 0.6, w + 0.6, d);
     let gw = planet_glow_px();
-    let glow = 0.35 * exp(-(d * d) / (gw * gw));
-    return vec4<f32>(fade * (0.9 * core + glow), 0.0, 0.0, 0.0);
+    let glow = 0.22 * exp(-(d * d) / (gw * gw));
+    return vec4<f32>(fade * (0.8 * core + glow), 0.0, 0.0, 0.0);
 }
 
 // ---------------------------------------------------------------- starfield (drawn once per size)
