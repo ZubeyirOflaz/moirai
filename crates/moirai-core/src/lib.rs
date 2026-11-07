@@ -5,10 +5,12 @@
 //! * [`steer`] (Lachesis): rewrites the not-yet-shown future with tiny invisible nudges.
 //! * [`timeline`] (Clotho): the committed future of a scene, filled ahead of the display.
 //! * [`library`] / [`scene`]: stable choreographies, random dances and the director.
+//! * [`planet`]: a massless planet among the three suns, restarted when it is lost.
 
 pub mod events;
 pub mod library;
 pub mod physics;
+pub mod planet;
 pub mod rng;
 pub mod scene;
 pub mod steer;

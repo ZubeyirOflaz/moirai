@@ -122,10 +122,12 @@ impl Director {
             Some(n) => format!("{n} · choreography #{}", orbit.id),
             None => format!("Choreography #{}", orbit.id),
         };
+        let mut timeline = Timeline::new(y, model, None, None, self.rng.next_u64());
+        timeline.add_planet();
         Scene {
             kind: Kind::Choreography { id: orbit.id, kick },
             title,
-            timeline: Timeline::new(y, model, None, None, self.rng.next_u64()),
+            timeline,
             duration,
             trail: period.clamp(1.2 * REV, 3.0 * REV),
             frame_radius: Some(orbit.extent * 1.12),
@@ -143,6 +145,7 @@ impl Director {
             let y0 = random_democratic(&mut rng, &model);
             if flags(&y0, &model, &Limits::dance()) == 0 {
                 let mut tl = Timeline::new(y0, model, Some(Limits::dance()), Some(steer), s);
+                tl.add_planet();
                 if tl.fill(0.0, steer.buffer, true).is_none() {
                     return Scene {
                         kind: Kind::Dance { seed: s },

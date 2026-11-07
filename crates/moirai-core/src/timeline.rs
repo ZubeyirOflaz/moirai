@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 
 use crate::events::{Limits, flags};
 use crate::physics::{Model, NB, REV, Step, Stop, Y, hermite, integrate};
+use crate::planet::{Planet, PlanetSim};
 use crate::rng::Rng;
 use crate::steer::{SteerParams, search};
 
@@ -54,11 +55,14 @@ pub struct Timeline {
     grid: f64,
     y: Y,
     t: f64,
-    checkpoints: VecDeque<(i64, Y)>,
+    /// States on the time grid (with the planet's, once it is placed), to restart from.
+    checkpoints: VecDeque<(i64, Y, Option<Planet>)>,
     samples: VecDeque<Sample>,
     last_nudge: f64,
+    seed: u64,
     rng: Rng,
     failed_at: Option<f64>,
+    planet: Option<PlanetSim>,
     pub stats: Stats,
 }
 
@@ -78,7 +82,7 @@ fn emit(samples: &mut VecDeque<Sample>, s: &Step) {
 impl Timeline {
     pub fn new(y0: Y, model: Model, limits: Option<Limits>, steer: Option<SteerParams>, seed: u64) -> Self {
         let mut checkpoints = VecDeque::new();
-        checkpoints.push_back((0, y0));
+        checkpoints.push_back((0, y0, None));
         let mut samples = VecDeque::new();
         samples.push_back(Sample::from_state(0.0, &y0, [0.0; NB]));
         Self {
@@ -91,10 +95,23 @@ impl Timeline {
             checkpoints,
             samples,
             last_nudge: 0.0,
+            seed,
             rng: Rng::new(seed ^ 0x5eed_cafe),
             failed_at: None,
+            planet: None,
             stats: Stats::default(),
         }
+    }
+
+    /// Let a massless planet ride along from the start (see [`crate::planet`]). Call before the
+    /// first fill.
+    pub fn add_planet(&mut self) {
+        self.planet = Some(PlanetSim::new(self.seed ^ 0x9a1e_7a5e_ed00_0001));
+    }
+
+    /// The planet, if there is one, with its path so far.
+    pub fn planet(&self) -> Option<&PlanetSim> {
+        self.planet.as_ref()
     }
 
     pub fn model(&self) -> &Model {
@@ -126,6 +143,7 @@ impl Timeline {
             let checks = if self.failed_at.is_none() { self.limits } else { None };
             let samples = &mut self.samples;
             let checkpoints = &mut self.checkpoints;
+            let planet = &mut self.planet;
             let steps = &mut self.stats.steps;
             let stop = integrate(
                 &mut self.y,
@@ -137,8 +155,11 @@ impl Timeline {
                 |s| {
                     *steps += 1;
                     emit(samples, s);
+                    if let Some(p) = planet.as_mut() {
+                        p.advance(&model, s);
+                    }
                     if let Some(k) = s.grid_index {
-                        checkpoints.push_back((k, *s.y1));
+                        checkpoints.push_back((k, *s.y1, planet.as_ref().and_then(|p| p.body)));
                     }
                 },
             );
@@ -183,18 +204,29 @@ impl Timeline {
         true
     }
 
-    /// Replace the state at grid point `kn` and drop everything after it.
+    /// Replace the state at grid point `kn` and drop everything after it. The planet's state at
+    /// that moment stays (a nudge to the stars does not move it) and its future is recomputed.
     fn rewrite(&mut self, kn: i64, y: Y) {
         let tn = kn as f64 * self.grid;
         while self.checkpoints.back().is_some_and(|c| c.0 > kn) {
             self.checkpoints.pop_back();
         }
-        match self.checkpoints.back_mut() {
-            Some(c) if c.0 == kn => c.1 = y,
-            _ => self.checkpoints.push_back((kn, y)),
-        }
+        let body = match self.checkpoints.back_mut() {
+            Some(c) if c.0 == kn => {
+                c.1 = y;
+                c.2
+            }
+            _ => {
+                self.checkpoints.push_back((kn, y, None));
+                None
+            }
+        };
         while self.samples.len() > 1 && self.samples.back().is_some_and(|s| s.t > tn + 1e-12) {
             self.samples.pop_back();
+        }
+        if let Some(p) = self.planet.as_mut() {
+            // at the start nothing is placed yet: the planet is placed again around the new start
+            p.rewind(tn, body);
         }
         self.y = y;
         self.t = tn;
@@ -204,6 +236,9 @@ impl Timeline {
     pub fn trim(&mut self, before: f64) {
         while self.samples.len() > 2 && self.samples[1].t <= before {
             self.samples.pop_front();
+        }
+        if let Some(p) = self.planet.as_mut() {
+            p.trim(before);
         }
         let kb = (before / self.grid).floor() as i64;
         while self.checkpoints.len() > 1 && self.checkpoints[1].0 <= kb {
@@ -282,5 +317,37 @@ mod tests {
         if tl.failed_at().is_none() {
             assert!(tl.stats.max_visible_eta <= 1e-2);
         }
+    }
+
+    #[test]
+    fn the_planet_rides_along_without_moving_the_stars() {
+        let model = Model::default();
+        let limits = Limits::dance();
+        let y0 = random_democratic(&mut Rng::new(23), &model);
+        let run = |planet: bool| {
+            let mut tl = Timeline::new(y0, model, Some(limits), Some(SteerParams::default()), 23);
+            if planet {
+                tl.add_planet();
+            }
+            let buffer = SteerParams::default().buffer;
+            tl.fill(0.0, buffer, true);
+            let mut display = 0.0;
+            while display < 12.0 * REV {
+                display += 0.25 * REV;
+                tl.fill(display, display + buffer, false);
+            }
+            tl
+        };
+        let (with, without) = (run(true), run(false));
+        assert!(with.samples().iter().eq(without.samples().iter()), "the stars must not notice the planet");
+        let path = &with.planet().expect("planet").samples;
+        assert!(path.len() > 100);
+        assert!(path.iter().zip(path.iter().skip(1)).all(|(a, b)| b.t >= a.t && b.run >= a.run));
+        // a new planet starts exactly when the previous one is lost, and only then
+        for (a, b) in path.iter().zip(path.iter().skip(1)) {
+            assert_eq!(b.run != a.run, a.fate.is_some());
+        }
+        // and the whole thing is repeatable, rewrites included
+        assert!(path.iter().eq(run(true).planet().unwrap().samples.iter()));
     }
 }
