@@ -11,12 +11,12 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::engine::{Engine, EngineConfig};
-use crate::render::{Gpu, Renderer, instance};
+use crate::render::{Gpu, Look, Renderer, instance};
 
 pub struct WindowOptions {
     pub fullscreen: bool,
     pub fps: f64,
-    pub stars: f32,
+    pub look: Look,
 }
 
 struct Gfx {
@@ -88,7 +88,7 @@ impl App {
         engine.update((now - self.last).as_secs_f64().min(0.25));
         self.last = now;
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let input = engine.frame(self.opts.stars);
+        let input = engine.frame(self.opts.look);
         let mut enc = gfx.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         gfx.renderer.render(&gfx.gpu, &mut enc, &view, &input);
         gfx.gpu.queue.submit([enc.finish()]);
@@ -120,6 +120,12 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::Space) => {
                         if let Some(e) = self.engine.as_mut() {
                             e.paused = !e.paused;
+                        }
+                    }
+                    Key::Character("t") => self.opts.look.style = self.opts.look.style.next(),
+                    Key::Character("c") => {
+                        if let Some(e) = self.engine.as_mut() {
+                            e.cycle_palette();
                         }
                     }
                     _ => {}

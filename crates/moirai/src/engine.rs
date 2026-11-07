@@ -12,7 +12,7 @@ use moirai_core::REV;
 use moirai_core::scene::{Director, DirectorConfig, Scene};
 use moirai_core::timeline::{Sample, interpolate};
 
-use crate::render::{FrameInput, PALETTES, TrailPoint};
+use crate::render::{FrameInput, Look, PALETTES, Palette, TrailPoint};
 
 struct AtomicF64(AtomicU64);
 
@@ -80,6 +80,22 @@ pub struct EngineConfig {
     pub seconds_per_rev: f64,
     /// Fade in/out length in seconds.
     pub fade_seconds: f64,
+    /// Palettes in rotation, as a bit set over `PALETTES` (0 means the featured ones).
+    pub palettes: u32,
+}
+
+/// Indices into `PALETTES` selected by a bit set (the featured palettes if it is empty).
+pub fn palette_rotation(mask: u32) -> Vec<usize> {
+    let picked: Vec<usize> = (0..PALETTES.len()).filter(|&i| mask & (1 << i) != 0).collect();
+    if picked.is_empty() { (0..PALETTES.len()).filter(|&i| PALETTES[i].featured).collect() } else { picked }
+}
+
+/// Framing radius a free dance is designed around (its camera follows the motion).
+const DANCE_RADIUS: f64 = 1.6;
+
+/// Per-scene salt for the dust, derived from the scene's random palette pick.
+fn dust_salt(palette: u32) -> u32 {
+    palette.rotate_left(13).wrapping_mul(0x85eb_ca6b)
 }
 
 fn make_scene(d: &mut Director, req: SceneRequest) -> Scene {
@@ -151,6 +167,9 @@ pub struct Engine {
     radius: f64,
     radius_target: f64,
     pub paused: bool,
+    rotation: Vec<usize>,
+    /// Palette steps taken with the cycle key in the current scene.
+    palette_shift: usize,
     trails: [Vec<TrailPoint>; 3],
     bodies: [[f32; 2]; 3],
 }
@@ -182,6 +201,8 @@ impl Engine {
             radius,
             radius_target: radius,
             paused: false,
+            rotation: palette_rotation(cfg.palettes),
+            palette_shift: 0,
             trails: Default::default(),
             bodies: [[0.0; 2]; 3],
         }
@@ -189,6 +210,16 @@ impl Engine {
 
     pub fn title(&self) -> &str {
         &self.current.title
+    }
+
+    fn palette(&self) -> &'static Palette {
+        let n = self.rotation.len();
+        &PALETTES[self.rotation[(self.current.palette as usize % n + self.palette_shift) % n]]
+    }
+
+    /// Show the current scene in the next palette of the rotation.
+    pub fn cycle_palette(&mut self) {
+        self.palette_shift += 1;
     }
 
     fn speed(&self) -> f64 {
@@ -216,6 +247,7 @@ impl Engine {
                 t = end;
                 if let Ok(next) = self.rx.try_recv() {
                     self.current = next;
+                    self.palette_shift = 0;
                     t = 0.0;
                     self.radius = self.current.frame_radius.unwrap_or(self.radius);
                 }
@@ -235,7 +267,7 @@ impl Engine {
     }
 
     /// Build the frame for the current clock.
-    pub fn frame(&mut self, stars: f32) -> FrameInput<'_> {
+    pub fn frame(&mut self, look: Look) -> FrameInput<'_> {
         let cur = self.current.clone();
         let t = self.clock;
         let trail = cur.trail;
@@ -254,14 +286,14 @@ impl Engine {
                 }
                 let age = ((t - s.t) / trail).clamp(0.0, 1.0) as f32;
                 for b in 0..3 {
-                    self.trails[b].push(TrailPoint { p: s.p[b], age });
+                    self.trails[b].push(TrailPoint { p: s.p[b], age, s: s.s[b] });
                     rmax = rmax.max((s.p[b][0] as f64).hypot(s.p[b][1] as f64));
                 }
             }
             if let Some(pos) = interpolate(n, t, |i| samples[i]) {
                 for ((trail, body), q) in self.trails.iter_mut().zip(&mut self.bodies).zip(pos) {
                     let p = [q[0] as f32, q[1] as f32];
-                    trail.push(TrailPoint { p, age: 0.0 });
+                    push_head(trail, p);
                     *body = p;
                 }
             }
@@ -273,18 +305,27 @@ impl Engine {
         if cur.frame_radius.is_some() {
             self.radius = self.radius_target;
         }
-        let palette = &PALETTES[cur.palette as usize % PALETTES.len()];
         FrameInput {
             trails: [&self.trails[0], &self.trails[1], &self.trails[2]],
             bodies: self.bodies,
             center: [0.0, 0.0],
             radius: self.radius as f32,
-            palette,
+            palette: self.palette(),
             fade: self.fade() as f32,
             time: self.elapsed as f32,
-            stars,
+            look,
+            path_radius: cur.frame_radius.unwrap_or(DANCE_RADIUS),
+            salt: dust_salt(cur.palette),
         }
     }
+}
+
+/// Append the interpolated current position as the newest trail point.
+fn push_head(trail: &mut Vec<TrailPoint>, p: [f32; 2]) {
+    let s = trail.last().map_or(0.0, |l| {
+        l.s + ((p[0] - l.p[0]) as f64).hypot((p[1] - l.p[1]) as f64)
+    });
+    trail.push(TrailPoint { p, age: 0.0, s });
 }
 
 impl Drop for Engine {
@@ -311,36 +352,48 @@ pub fn snapshot_scene(req: SceneRequest, seed: u64, at_revs: f64) -> (Scene, f64
     (scene, t)
 }
 
-/// Frame input for a scene computed synchronously (snapshots).
-pub fn still_frame<'a>(scene: &Scene, t: f64, trails: &'a mut [Vec<TrailPoint>; 3], stars: f32) -> FrameInput<'a> {
+/// Frame input for a scene computed synchronously (snapshots). `palettes` is the rotation as
+/// in `EngineConfig`; `time` drives the twinkling.
+pub fn still_frame<'a>(
+    scene: &Scene,
+    t: f64,
+    trails: &'a mut [Vec<TrailPoint>; 3],
+    look: Look,
+    palettes: u32,
+    time: f32,
+) -> FrameInput<'a> {
     let samples = scene.timeline.samples();
+    let trail = scene.trail;
     let mut bodies = [[0.0f32; 2]; 3];
     let mut rmax: f64 = 0.0;
     for v in trails.iter_mut() {
         v.clear();
     }
-    for s in samples.iter().filter(|s| s.t >= t - scene.trail && s.t <= t) {
-        let age = ((t - s.t) / scene.trail) as f32;
-        for (trail, p) in trails.iter_mut().zip(s.p) {
-            trail.push(TrailPoint { p, age });
-            rmax = rmax.max((p[0] as f64).hypot(p[1] as f64));
+    for s in samples.iter().filter(|s| s.t >= t - trail && s.t <= t) {
+        let age = ((t - s.t) / trail) as f32;
+        for (b, trail) in trails.iter_mut().enumerate() {
+            trail.push(TrailPoint { p: s.p[b], age, s: s.s[b] });
+            rmax = rmax.max((s.p[b][0] as f64).hypot(s.p[b][1] as f64));
         }
     }
     if let Some(pos) = interpolate(samples.len(), t, |i| samples[i]) {
         for b in 0..3 {
             bodies[b] = [pos[b][0] as f32, pos[b][1] as f32];
-            trails[b].push(TrailPoint { p: bodies[b], age: 0.0 });
+            push_head(&mut trails[b], bodies[b]);
         }
     }
     let radius = scene.frame_radius.unwrap_or((rmax * 1.18).clamp(1.1, 3.5));
+    let rotation = palette_rotation(palettes);
     FrameInput {
         trails: [&trails[0], &trails[1], &trails[2]],
         bodies,
         center: [0.0, 0.0],
         radius: radius as f32,
-        palette: &PALETTES[scene.palette as usize % PALETTES.len()],
+        palette: &PALETTES[rotation[scene.palette as usize % rotation.len()]],
         fade: 1.0,
-        time: 0.0,
-        stars,
+        time,
+        look,
+        path_radius: scene.frame_radius.unwrap_or(DANCE_RADIUS),
+        salt: dust_salt(scene.palette),
     }
 }

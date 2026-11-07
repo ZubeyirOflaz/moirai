@@ -21,14 +21,18 @@ pub struct Sample {
     pub t: f64,
     pub p: [[f32; 2]; NB],
     pub v: [[f32; 2]; NB],
+    /// Path length each body has travelled since the scene began (along the sample chords).
+    /// Stable once a sample is shown, so renderers can pin things to places on the path.
+    pub s: [f64; NB],
 }
 
 impl Sample {
-    fn from_state(t: f64, y: &Y) -> Self {
+    fn from_state(t: f64, y: &Y, s: [f64; NB]) -> Self {
         Self {
             t,
             p: std::array::from_fn(|b| [y[2 * b] as f32, y[2 * b + 1] as f32]),
             v: std::array::from_fn(|b| [y[6 + 2 * b] as f32, y[7 + 2 * b] as f32]),
+            s,
         }
     }
 }
@@ -60,13 +64,14 @@ pub struct Timeline {
 
 fn emit(samples: &mut VecDeque<Sample>, s: &Step) {
     let last = samples.back().expect("timeline always holds a sample");
-    let moved = (0..NB).any(|b| {
+    let moved: [f64; NB] = std::array::from_fn(|b| {
         let dx = s.y1[2 * b] - last.p[b][0] as f64;
         let dy = s.y1[2 * b + 1] - last.p[b][1] as f64;
-        dx * dx + dy * dy >= SAMPLE_DS * SAMPLE_DS
+        dx.hypot(dy)
     });
-    if moved || s.t1 - last.t >= SAMPLE_DT {
-        samples.push_back(Sample::from_state(s.t1, s.y1));
+    if moved.iter().any(|&d| d >= SAMPLE_DS) || s.t1 - last.t >= SAMPLE_DT {
+        let travelled = std::array::from_fn(|b| last.s[b] + moved[b]);
+        samples.push_back(Sample::from_state(s.t1, s.y1, travelled));
     }
 }
 
@@ -75,7 +80,7 @@ impl Timeline {
         let mut checkpoints = VecDeque::new();
         checkpoints.push_back((0, y0));
         let mut samples = VecDeque::new();
-        samples.push_back(Sample::from_state(0.0, &y0));
+        samples.push_back(Sample::from_state(0.0, &y0, [0.0; NB]));
         Self {
             model,
             limits,
@@ -269,6 +274,10 @@ mod tests {
         }
         let s = tl.samples();
         assert!(s.iter().zip(s.iter().skip(1)).all(|(a, b)| b.t > a.t), "samples must be strictly ordered");
+        assert!(
+            s.iter().zip(s.iter().skip(1)).all(|(a, b)| (0..NB).all(|k| b.s[k] >= a.s[k])),
+            "path length must never decrease"
+        );
         assert!(tl.positions_at(display).is_some());
         if tl.failed_at().is_none() {
             assert!(tl.stats.max_visible_eta <= 1e-2);

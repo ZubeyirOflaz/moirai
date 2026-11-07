@@ -1,20 +1,37 @@
-// Moirai shaders: glowing trails (max-blended per body) and a single composite pass.
+// Moirai shaders: trails (smoke plumes, glowing lines or stardust motes), a starfield drawn
+// once per size, and a single composite pass.
 
 struct Globals {
     size: vec2<f32>,        // target size in pixels
     center: vec2<f32>,      // world point at the centre of the frame
     scale: f32,             // pixels per world unit
-    fade: f32,              // global brightness (scene transitions)
-    time: f32,              // seconds, for the starfield twinkle
-    core_px: f32,           // trail core half-width
-    glow_px: f32,           // trail glow radius
+    fade: f32,              // brightness of trails and bodies (scene transitions)
+    time: f32,              // seconds, for twinkling and churning
+    core_px: f32,           // line core half-width
+    glow_px: f32,           // line glow radius
     glow_amp: f32,
     body_core_px: f32,
     body_halo_px: f32,
     encode_srgb: f32,       // 1 when the target is a linear (non-sRGB) format
     exposure: f32,
-    stars: f32,
-    _pad: f32,
+    stars: f32,             // starfield brightness
+    line_core: f32,         // crisp line core (0 for stardust, which keeps only the glow)
+    dust_px: f32,           // typical mote radius
+    dust_spread_px: f32,    // how far motes drift by the end of the trail
+    dust_gain: f32,         // mote brightness
+    dust_hot: f32,          // white-hot share of freshly shed motes
+    core_span: f32,         // lines fade out over this share of the trail
+    smoke_on: f32,
+    smoke_w0: f32,          // plume half-width at birth (px)
+    smoke_w1: f32,          // plume half-width at the end of the trail (px)
+    smoke_drift: f32,       // sideways drift of the oldest smoke (px)
+    smoke_freq: f32,        // noise tiles per world unit of path
+    smoke_gain: f32,
+    smoke_hot: f32,
+    smoke_flow: f32,        // how far fresh plasma streams back from the body (px)
+    pad0: f32,
+    pad1: f32,
+    pad2: f32,
     colors: array<vec4<f32>, 3>,
     bodies: array<vec4<f32>, 3>,   // xy: position (world), z: brightness
     bg_center: vec4<f32>,
@@ -28,14 +45,56 @@ fn to_px(w: vec2<f32>) -> vec2<f32> {
                      g.size.y * 0.5 - (w.y - g.center.y) * g.scale);
 }
 
-// ---------------------------------------------------------------- trails
+fn to_clip(p: vec2<f32>) -> vec4<f32> {
+    return vec4<f32>(p.x / g.size.x * 2.0 - 1.0, 1.0 - p.y / g.size.y * 2.0, 0.0, 1.0);
+}
 
+// Corners of a quad as two triangles, in [-1, 1]^2.
+fn quad_corner(vi: u32) -> vec2<f32> {
+    var c = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0));
+    return c[vi];
+}
+
+// Corner `vi` of a rectangle around segment a-b, padded by r on every side.
+fn capsule_corner(a: vec2<f32>, b: vec2<f32>, r: f32, vi: u32) -> vec2<f32> {
+    var dir = b - a;
+    let len = length(dir);
+    if (len < 1e-4) {
+        dir = vec2<f32>(1.0, 0.0);
+    } else {
+        dir = dir / len;
+    }
+    let nrm = vec2<f32>(-dir.y, dir.x);
+    let c = quad_corner(vi);
+    let along = select(-r, len + r, c.x > 0.0);
+    return a + dir * along + nrm * c.y * r;
+}
+
+// Write intensity `v` into the channel of `body`, and `hot` into the white-hot channel.
+fn body_channel(body: u32, v: f32, hot: f32) -> vec4<f32> {
+    var out = vec4<f32>(0.0, 0.0, 0.0, hot);
+    if (body == 0u) {
+        out.x = v;
+    } else if (body == 1u) {
+        out.y = v;
+    } else {
+        out.z = v;
+    }
+    return out;
+}
+
+// One merged piece of a trail. `s` is the path length at both ends (world units).
 struct Seg {
     @location(0) p0: vec2<f32>,
     @location(1) p1: vec2<f32>,
     @location(2) ages: vec2<f32>,
-    @location(3) body: u32,
+    @location(3) s: vec2<f32>,
+    @location(4) body: u32,
 };
+
+// ---------------------------------------------------------------- line trails
 
 struct TrailOut {
     @builtin(position) pos: vec4<f32>,
@@ -50,23 +109,12 @@ struct TrailOut {
 fn vs_trail(@builtin(vertex_index) vi: u32, s: Seg) -> TrailOut {
     let a = to_px(s.p0);
     let b = to_px(s.p1);
-    let r = g.core_px + 3.0 * g.glow_px + 1.0;
-    var dir = b - a;
-    let len = length(dir);
-    if (len < 1e-4) {
-        dir = vec2<f32>(1.0, 0.0);
-    } else {
-        dir = dir / len;
-    }
-    let nrm = vec2<f32>(-dir.y, dir.x);
-    var corners = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
-        vec2<f32>(0.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0));
-    let c = corners[vi];
-    let along = select(-r, len + r, c.x > 0.5);
-    let p = a + dir * along + nrm * c.y * r;
+    let p = capsule_corner(a, b, g.core_px + 2.6 * g.glow_px + 1.0, vi); // glow < 1/1000 beyond
     var o: TrailOut;
-    o.pos = vec4<f32>(p.x / g.size.x * 2.0 - 1.0, 1.0 - p.y / g.size.y * 2.0, 0.0, 1.0);
+    o.pos = to_clip(p);
+    if (min(s.ages.x, s.ages.y) >= g.core_span) {
+        o.pos = vec4<f32>(2.0, 2.0, 0.0, 1.0); // entirely past the line's span: draw nothing
+    }
     o.px = p;
     o.a = a;
     o.b = b;
@@ -81,7 +129,7 @@ fn fs_trail(i: TrailOut) -> @location(0) vec4<f32> {
     let l2 = max(dot(ab, ab), 1e-6);
     let t = clamp(dot(i.px - i.a, ab) / l2, 0.0, 1.0);
     let d = length(i.px - (i.a + ab * t));
-    let life = 1.0 - mix(i.ages.x, i.ages.y, t);
+    let life = 1.0 - mix(i.ages.x, i.ages.y, t) / g.core_span;
     if (life <= 0.0) {
         discard;
     }
@@ -89,21 +137,281 @@ fn fs_trail(i: TrailOut) -> @location(0) vec4<f32> {
     let w = g.core_px * (0.35 + 0.65 * life);
     let core = 1.0 - smoothstep(w - 0.7, w + 0.7, d);
     let glow = g.glow_amp * exp(-(d * d) / (g.glow_px * g.glow_px));
-    let v = fade * (core + glow);
-    var out = vec4<f32>(0.0, 0.0, 0.0, fade * core);
-    if (i.body == 0u) {
-        out.x = v;
-    } else if (i.body == 1u) {
-        out.y = v;
-    } else {
-        out.z = v;
+    let c = g.line_core * core;
+    return body_channel(i.body, fade * (c + glow), fade * c);
+}
+
+// ---------------------------------------------------------------- smoke
+
+@group(1) @binding(0) var noise_tex: texture_3d<f32>;
+@group(1) @binding(1) var noise_smp: sampler;
+
+// Half-width of the plume: slim near the body, spreading as it ages.
+fn smoke_width(age: f32) -> f32 {
+    return mix(g.smoke_w0, g.smoke_w1, pow(max(age, 0.0), 0.9));
+}
+
+// How far the oldest smoke may have drifted sideways.
+fn smoke_drift_amp(age: f32) -> f32 {
+    return g.smoke_drift * age * sqrt(age);
+}
+
+// The noise volume as unit-variance gradient noise: features of a quarter, an eighth and a
+// sixteenth of a tile in x, y and z, and an independent quarter in w.
+fn noise4(p: vec3<f32>) -> vec4<f32> {
+    return (textureSampleLevel(noise_tex, noise_smp, p, 0.0) - vec4<f32>(0.5)) * 6.6666667;
+}
+
+// Turbulence keeps its eddies about as large as the plume is wide: features of `l` px count
+// fully in a plume whose eddies are `l` px, and less and less over an octave or two either
+// way (a broad mix of sizes, so that nothing looks regular).
+fn octave(l: f32, e: f32) -> f32 {
+    let x = log2(l / e);
+    return exp(-0.5 * x * x);
+}
+
+// The octaves of one noise sample (features of l, l/2 and l/4 px) weighted for eddies of `e`
+// px: the weighted sum and the sum of squared weights (which normalises the variance).
+fn eddies(n: vec4<f32>, l: f32, e: f32) -> vec2<f32> {
+    let a = octave(l, e);
+    let b = octave(0.5 * l, e);
+    let c = octave(0.25 * l, e);
+    return vec2<f32>(a * n.x + b * n.y + c * n.z, a * a + b * b + c * c);
+}
+
+struct SmokeOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) px: vec2<f32>,
+    @location(1) @interpolate(flat) a: vec2<f32>,
+    @location(2) @interpolate(flat) b: vec2<f32>,
+    @location(3) @interpolate(flat) ages: vec2<f32>,
+    @location(4) @interpolate(flat) s: vec2<f32>,
+    @location(5) @interpolate(flat) body: u32,
+};
+
+@vertex
+fn vs_smoke(@builtin(vertex_index) vi: u32, s: Seg) -> SmokeOut {
+    let a = to_px(s.p0);
+    let b = to_px(s.p1);
+    let age = max(s.ages.x, s.ages.y);
+    // the widest puff (2.5 local half-widths, which swell up to 1.82x) and the furthest drift
+    let p = capsule_corner(a, b, 4.6 * smoke_width(age) + smoke_drift_amp(age) + 2.0, vi);
+    var o: SmokeOut;
+    o.pos = to_clip(p);
+    o.px = p;
+    o.a = a;
+    o.b = b;
+    o.ages = s.ages;
+    o.s = s.s;
+    o.body = s.body;
+    return o;
+}
+
+@fragment
+fn fs_smoke(i: SmokeOut) -> @location(0) vec4<f32> {
+    // Coordinates pinned to the path: u along it (in noise periods) and the distance across it
+    // (px), sampled at the same scale both ways so that every feature is round, not streaked.
+    // Every along-path frequency is a multiple of 1/4: the CPU rebases u by multiples of 4.
+    let ab = i.b - i.a;
+    let len = max(length(ab), 1e-3);
+    let dir = ab / len;
+    let rel = i.px - i.a;
+    let proj = dot(rel, dir);
+    let t = clamp(proj / len, 0.0, 1.0);
+    let age = mix(i.ages.x, i.ages.y, t);
+    if (age >= 1.0) {
+        discard;
     }
-    return out;
+    let beyond = proj - t * len; // px past either end of the segment
+    let u = (mix(i.s.x, i.s.y, t) + beyond / g.scale) * g.smoke_freq;
+    let pp = g.scale / g.smoke_freq; // px per noise period
+    let w = smoke_width(age);
+    let seed = f32(i.body) * 0.29;
+
+    // freshly shed plasma streams back from the body and slows down, then only churns in place
+    let uf = u + g.smoke_flow / pp * (1.0 - exp(-8.0 * age));
+
+    // Along the path, the older plume meanders sideways (features of a period and more) and
+    // swells into puffs and narrows between them (features a few plume widths long).
+    let big = noise4(vec3<f32>(uf * 0.25, 0.31 + seed, g.time * 0.011));
+    let mid = noise4(vec3<f32>(uf, 0.77 + seed, g.time * 0.019));
+    let sa = eddies(big, pp, 4.0 * w);
+    let sb = eddies(mid, 0.25 * pp, 4.0 * w);
+    let swell = (sa.x + sb.x) * inverseSqrt(sa.y + sb.y + 1e-3);
+    let wl = w * exp(0.3 * clamp(swell, -2.5, 2.0));
+    let lat = (dir.x * rel.y - dir.y * rel.x) - clamp(0.5 * big.w, -1.0, 1.0) * smoke_drift_amp(age);
+    let r2 = (lat * lat + beyond * beyond) / (wl * wl);
+    if (r2 > 6.25) {
+        discard;
+    }
+
+    // large eddies (features of pp/4 to pp/16): lumps on the plume's edges, and the swirl
+    // that carries the fine eddies around
+    let e = 2.2 * w; // typical eddy size
+    let q1 = vec3<f32>(uf, lat / pp + 0.37 + seed, g.time * 0.021);
+    let n1 = noise4(q1);
+    let n1b = noise4(q1 + vec3<f32>(0.5, 0.23, 0.61));
+    let s1 = eddies(n1, 0.25 * pp, e);
+    let se = eddies(n1, 0.25 * pp, 1.6 * e);
+    let lumps = se.x * inverseSqrt(se.y + 1e-3);
+    let wx = eddies(n1, 0.25 * pp, 2.5 * e);
+    let wy = eddies(n1b, 0.25 * pp, 2.5 * e);
+    let swirl = vec2<f32>(wx.x * inverseSqrt(wx.y + 1e-3), wy.x * inverseSqrt(wy.y + 1e-3)) * (0.35 * e);
+
+    // fine eddies (pp/16 to pp/64): soft variations of density inside the plume
+    let q2 = vec3<f32>(4.0 * (uf + swirl.x / pp), 4.0 * (lat + swirl.y) / pp + 0.71 + seed, g.time * 0.033 + 0.5);
+    let s2 = eddies(noise4(q2), 0.0625 * pp, e);
+    let billow = (s1.x + s2.x) * inverseSqrt(s1.y + s2.y + 1e-3); // about unit variance
+
+    // a soft plume with lumpy edges and denser puffs; late in life it gathers into clouds
+    let r = sqrt(r2) * (1.0 - 0.15 * clamp(lumps, -2.5, 2.0));
+    let prof = exp(-1.6 * r * r);
+    let clump = mix(1.0, smoothstep(-1.0, 0.8, big.y + 0.4), 0.7 * smoothstep(0.35, 1.0, age));
+    let dens = prof * exp(0.4 * billow - 0.08) * clump * sqrt(w / wl);
+    let halo = 0.10 * exp(-0.3 * r2); // the soft glow around the plasma
+    let edge = smoothstep(6.25, 3.5, r2);
+
+    // it thins as it spreads, and fades out by the end of the trail
+    let life = 1.0 - age;
+    let thin = pow(g.smoke_w0 / w, 0.5);
+    let light = g.smoke_gain * (dens + halo) * edge * life * life * thin;
+    return body_channel(i.body, light, g.smoke_hot * dens * edge * exp(-5.0 * age));
+}
+
+// ---------------------------------------------------------------- stardust
+
+struct MoteIn {
+    @location(0) p: vec2<f32>,
+    @location(1) age: f32,      // through its life (0 = just shed, 1 = gone)
+    @location(2) word: u32,
+    @location(3) drift: f32,    // its age by time alone
+};
+
+struct MoteOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) local: vec2<f32>,
+    @location(1) @interpolate(flat) radius: f32,
+    @location(2) @interpolate(flat) amp: f32,
+    @location(3) @interpolate(flat) hot: f32,
+    @location(4) @interpolate(flat) body: u32,
+};
+
+fn pcg(v: u32) -> u32 {
+    let s = v * 747796405u + 2891336453u;
+    let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+
+fn unit(h: u32) -> f32 {
+    return f32(h >> 8u) * (1.0 / 16777216.0);
+}
+
+@vertex
+fn vs_mote(@builtin(vertex_index) vi: u32, m: MoteIn) -> MoteOut {
+    // every property of a mote follows from its seed, so it is the same mote in every frame
+    let h1 = pcg(m.word);
+    let h2 = pcg(h1);
+    let h3 = pcg(h2);
+    let h4 = pcg(h3);
+    let h5 = pcg(h4);
+    let h6 = pcg(h5);
+    let h7 = pcg(h6);
+    let r_dir = unit(h1);
+    let r_dist = unit(h2);
+    let r_size = unit(h3);
+    let r_flux = unit(h4);
+    let r_rate = unit(h5);
+    let r_phase = unit(h6);
+    let age = m.age;
+    // most motes glow for most of the trail; a few burn out a little earlier
+    let own = age / (0.6 + 0.4 * unit(h7));
+    let life = 1.0 - own;
+
+    // drift away from the path, slowly at first, curling a little; most stay close to it
+    let ang = 6.2831853 * r_dir + (r_phase - 0.5) * 3.0 * m.drift;
+    let dist = g.dust_spread_px * (0.15 + 0.85 * r_dist * r_dist) * pow(m.drift, 1.5);
+    let c = to_px(m.p) + vec2<f32>(cos(ang), sin(ang)) * dist;
+
+    // fine grains and a few brighter sparks, shrinking as they burn out. Grains smaller than a
+    // pixel are drawn about a pixel wide and correspondingly fainter, which keeps them steady.
+    let size = g.dust_px * (0.6 + r_size * r_size * r_size) * (1.0 - 0.3 * own);
+    let radius = sqrt(size * size + 0.36);
+    let r2 = r_flux * r_flux;
+    let spark = r2 * r2 * r2;
+    let flux = (0.6 + 3.0 * spark) * size * size / (radius * radius);
+    let twinkle = 0.6 + 0.4 * sin(g.time * (0.8 + 3.2 * r_rate) + 6.2831853 * r_phase);
+    let fade = life * life * (3.0 - 2.0 * life);
+    let amp = g.dust_gain * flux * twinkle * fade;
+
+    let reach = 2.6 * radius + 1.0;
+    let corner = quad_corner(vi);
+    var o: MoteOut;
+    o.pos = to_clip(c + corner * reach);
+    if (own >= 1.0 || amp < 1e-4) {
+        o.pos = vec4<f32>(2.0, 2.0, 0.0, 1.0); // outside the clip volume: nothing is drawn
+    }
+    o.local = corner * reach;
+    o.radius = radius;
+    o.amp = amp;
+    o.hot = g.dust_hot * exp(-7.0 * m.drift);
+    o.body = m.word & 3u;
+    return o;
+}
+
+@fragment
+fn fs_mote(i: MoteOut) -> @location(0) vec4<f32> {
+    let v = i.amp * exp(-dot(i.local, i.local) / (i.radius * i.radius));
+    return body_channel(i.body, v, v * i.hot);
+}
+
+// ---------------------------------------------------------------- starfield (drawn once per size)
+
+struct StarIn {
+    @location(0) pos: vec2<f32>,
+    @location(1) radius: f32,
+    @location(2) halo: f32,
+    @location(3) color: vec3<f32>,
+    @location(4) phase: f32,
+};
+
+struct StarOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) local: vec2<f32>,
+    @location(1) @interpolate(flat) radius: f32,
+    @location(2) @interpolate(flat) halo: f32,
+    @location(3) @interpolate(flat) color: vec3<f32>,
+    @location(4) @interpolate(flat) phase: f32,
+};
+
+@vertex
+fn vs_star(@builtin(vertex_index) vi: u32, s: StarIn) -> StarOut {
+    let reach = s.radius * select(3.0, 9.0, s.halo > 0.0);
+    let corner = quad_corner(vi);
+    var o: StarOut;
+    o.pos = to_clip(s.pos + corner * reach);
+    o.local = corner * reach;
+    o.radius = s.radius;
+    o.halo = s.halo;
+    o.color = s.color;
+    o.phase = s.phase;
+    return o;
+}
+
+@fragment
+fn fs_star(i: StarOut) -> @location(0) vec4<f32> {
+    let d2 = dot(i.local, i.local);
+    let r2 = i.radius * i.radius;
+    let v = exp(-d2 / r2) + i.halo * exp(-d2 / (9.0 * r2));
+    // alpha carries the star's twinkle phase to the composite
+    return vec4<f32>(i.color * v, select(0.0, i.phase, v > 0.02));
 }
 
 // ---------------------------------------------------------------- composite
 
 @group(0) @binding(1) var trail_tex: texture_2d<f32>;
+@group(0) @binding(2) var star_tex: texture_2d<f32>;
+@group(0) @binding(3) var smoke_tex: texture_2d<f32>;
+@group(0) @binding(4) var smoke_smp: sampler;
 
 @vertex
 fn vs_full(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -118,41 +426,35 @@ fn hash2(p: vec2<f32>) -> f32 {
     return fract((r.x + r.y) * r.x);
 }
 
-fn starfield(px: vec2<f32>) -> vec3<f32> {
-    let cell = 9.0 * max(1.0, min(g.size.x, g.size.y) / 900.0);
-    let id = floor(px / cell);
-    let h = hash2(id + 17.0);
-    if (h > 0.07) {
-        return vec3<f32>(0.0);
-    }
-    let jitter = vec2<f32>(hash2(id + 7.1), hash2(id + 3.7));
-    let sp = (id + 0.25 + 0.5 * jitter) * cell;
-    let d = length(px - sp);
-    let b = pow(hash2(id + 1.3), 3.0) * 0.05;
-    let tw = 0.7 + 0.3 * sin(g.time * (0.25 + 0.6 * hash2(id + 9.2)) + 40.0 * h);
-    let tint = mix(vec3<f32>(0.75, 0.82, 1.0), vec3<f32>(1.0, 0.88, 0.75), hash2(id + 5.5));
-    let s = cell / 9.0;
-    return tint * b * tw * exp(-(d * d) / (0.9 * s * s));
-}
-
 fn srgb(c: vec3<f32>) -> vec3<f32> {
     let lo = c * 12.92;
     let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
     return select(hi, lo, c <= vec3<f32>(0.0031308));
 }
 
+// Per-body intensities (xyz) and white heat (w) to light.
+fn trail_light(t: vec4<f32>) -> vec3<f32> {
+    return t.x * g.colors[0].rgb + t.y * g.colors[1].rgb + t.z * g.colors[2].rgb + vec3<f32>(t.w * 0.18);
+}
+
 @fragment
 fn fs_comp(@builtin(position) fc: vec4<f32>) -> @location(0) vec4<f32> {
     let px = fc.xy;
-    let tr = textureLoad(trail_tex, vec2<i32>(px), 0);
+    let ip = vec2<i32>(px);
     let m = min(g.size.x, g.size.y);
     let uv = (px - 0.5 * g.size) / m;
     var col = mix(g.bg_center.rgb, g.bg_edge.rgb, smoothstep(0.0, 0.95, length(uv)));
     if (g.stars > 0.0) {
-        col += starfield(px) * g.stars;
+        // the sky stays while scenes fade; each star breathes at its own slow pace
+        let st = textureLoad(star_tex, ip, 0);
+        let rate = 0.35 + 1.4 * fract(st.a * 17.13);
+        let twinkle = 1.0 + 0.3 * sin(g.time * rate + 6.2831853 * st.a);
+        col += st.rgb * (twinkle * g.stars);
     }
-    col += tr.x * g.colors[0].rgb + tr.y * g.colors[1].rgb + tr.z * g.colors[2].rgb;
-    col += tr.w * 0.18 * vec3<f32>(1.0);
+    var fg = trail_light(textureLoad(trail_tex, ip, 0));
+    if (g.smoke_on > 0.5) {
+        fg += trail_light(textureSampleLevel(smoke_tex, smoke_smp, px / g.size, 0.0));
+    }
     for (var k = 0; k < 3; k++) {
         let bp = to_px(g.bodies[k].xy);
         let d = length(px - bp);
@@ -161,9 +463,9 @@ fn fs_comp(@builtin(position) fc: vec4<f32>) -> @location(0) vec4<f32> {
         let core = 1.0 - smoothstep(g.body_core_px - 0.9, g.body_core_px + 0.9, d);
         let halo = exp(-(d * d) / (hr * hr));
         let tail = 0.16 * hr * hr / (d * d + hr * hr);
-        col += c * (1.5 * halo + tail) + mix(c, vec3<f32>(g.bodies[k].z), 0.7) * core * 2.8;
+        fg += c * (1.5 * halo + tail) + mix(c, vec3<f32>(g.bodies[k].z), 0.7) * core * 2.8;
     }
-    col *= g.fade;
+    col += fg * g.fade;
     var mapped = vec3<f32>(1.0) - exp(-col * g.exposure);
     if (g.encode_srgb > 0.5) {
         // encode ourselves, then dither in the encoded domain to break up banding in the darks
