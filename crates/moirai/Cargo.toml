@@ -13,3 +13,4 @@ pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
 png = "0.18"
 libc = "0.2"
+fontdue = "0.9"

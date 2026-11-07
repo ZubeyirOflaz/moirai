@@ -112,18 +112,18 @@ const PLANET_TRAIL: f64 = 1.2;
 pub const PLANET_PACE: f64 = 0.5;
 
 /// The planet's recent path up to `t` (of its current run only), oldest first, into `out`, and
-/// where it is at `t`.
-fn planet_trail(samples: &VecDeque<PlanetSample>, t: f64, out: &mut Vec<TrailPoint>) -> Option<[f32; 2]> {
+/// where it is at `t` with its latest sample (run and chronicle).
+fn planet_trail(samples: &VecDeque<PlanetSample>, t: f64, out: &mut Vec<TrailPoint>) -> Option<([f32; 2], PlanetSample)> {
     out.clear();
-    let (head, run) = planet_at(samples, t)?;
+    let (head, now) = planet_at(samples, t)?;
     let start = samples.partition_point(|s| s.t < t - PLANET_TRAIL).saturating_sub(1);
-    for p in samples.iter().skip(start).take_while(|p| p.t <= t).filter(|p| p.run == run) {
+    for p in samples.iter().skip(start).take_while(|p| p.t <= t).filter(|p| p.run == now.run) {
         let age = ((t - p.t) / PLANET_TRAIL).clamp(0.0, 1.0) as f32;
         push_point(out, p.p, age);
     }
     let head = [head[0] as f32, head[1] as f32];
     push_point(out, head, 0.0);
-    Some(head)
+    Some((head, now))
 }
 
 /// Append a trail point, measuring the path length along the way.
@@ -367,7 +367,7 @@ impl Engine {
             look,
             path_radius: cur.frame_radius.unwrap_or(DANCE_RADIUS),
             salt: dust_salt(cur.palette),
-            planet: planet.map(|pos| PlanetView { trail: &self.planet_trail, pos }),
+            planet: planet.map(|(pos, now)| PlanetView { trail: &self.planet_trail, pos, number: now.run + 1, chronicle: now.chronicle }),
         }
     }
 }
@@ -388,9 +388,9 @@ impl Drop for Engine {
     }
 }
 
-/// How long each planet of a scene lasted (revolutions) and how it ended (`None`: still there
-/// when the scene ended).
-pub type PlanetRuns = Vec<(f64, Option<moirai_core::planet::Fate>)>;
+/// For each planet of a scene: how long it lasted (revolutions), how it ended (`None`: still
+/// there when the scene ended) and what it had lived through by then.
+pub type PlanetRuns = Vec<(f64, Option<moirai_core::planet::Fate>, moirai_core::planet::Chronicle)>;
 
 /// Simulate `count` scenes (the first as requested, then as the director picks them) and return
 /// each one's title and planet runs.
@@ -407,15 +407,17 @@ pub fn planet_runs(seed: u64, director: DirectorConfig, first: SceneRequest, cou
             let mut runs = Vec::new();
             if let Some(planet) = scene.timeline.planet() {
                 let mut start: Option<f64> = None;
+                let mut last = None;
                 for s in planet.samples.iter().take_while(|s| s.t <= scene.duration) {
                     let begun = *start.get_or_insert(s.t);
+                    last = Some(s.chronicle);
                     if s.fate.is_some() {
-                        runs.push(((s.t - begun) / REV, s.fate));
+                        runs.push(((s.t - begun) / REV, s.fate, s.chronicle));
                         start = None;
                     }
                 }
-                if let Some(begun) = start {
-                    runs.push(((scene.duration - begun) / REV, None));
+                if let (Some(begun), Some(c)) = (start, last) {
+                    runs.push(((scene.duration - begun) / REV, None, c));
                 }
             }
             (scene.title, runs)
@@ -484,6 +486,6 @@ pub fn still_frame<'a>(
         look,
         path_radius: scene.frame_radius.unwrap_or(DANCE_RADIUS),
         salt: dust_salt(scene.palette),
-        planet: planet.map(|pos| PlanetView { trail: &planet_path[..], pos }),
+        planet: planet.map(|(pos, now)| PlanetView { trail: &planet_path[..], pos, number: now.run + 1, chronicle: now.chronicle }),
     }
 }

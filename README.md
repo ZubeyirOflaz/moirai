@@ -65,6 +65,14 @@ See `moirai --help` for all options, `moirai --list` for the choreographies, and
   it is shown the scene runs at half speed, so that its orbit can be followed, and the suns'
   glow is smaller, so that it does not hide a planet close to its sun.
 
+  A readout in the corner tells its story. The era is **stable** while the planet is bound to
+  one sun and the others barely disturb it, and **chaotic** otherwise. Counters show the eras,
+  civilisations and planets so far, and a gauge shows the surface temperature on a log scale
+  from 3 K to 10,000 K, with the liquid-water band marked. The temperature comes from the three
+  suns' light, with some thermal inertia, and tints the planet. A civilisation perishes when
+  the seas boil (400 K) or freeze solid (180 K); the planet carries on, and a new civilisation
+  rises once the climate has stayed mild for a few planet years.
+
 ### In a Ghostty split
 
 Open a split (e.g. `ctrl+shift+o` / `ctrl+shift+e` by default) and run `moirai --term` there.
@@ -152,6 +160,9 @@ normalisation), how stardust fades by turning, and the planet (stable orbits, lo
 restarts, a path that leaves the stars bit-for-bit unchanged and repeats exactly).
 
 ## Credits
+
+The readout is set in [Inter](https://rsms.me/inter/) by Rasmus Andersson (SIL Open Font
+License 1.1, see `crates/moirai/assets/Inter-LICENSE.txt`).
 
 Stable orbits: I. Hristov, R. Hristova and K. Tanikawa, *An extensive search for stable periodic
 orbits of the equal-mass zero angular momentum three-body problem* (2025),

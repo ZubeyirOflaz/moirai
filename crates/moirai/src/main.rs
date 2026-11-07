@@ -1,6 +1,7 @@
 //! Moirai: three bodies, dancing forever.
 
 mod engine;
+mod hud;
 mod render;
 mod term;
 mod window;
@@ -207,6 +208,7 @@ fn planet_stats(a: &Args, count: usize) -> Result<(), String> {
     use moirai_core::planet::Fate;
     let director = DirectorConfig { dance_share: a.dances, scene_revs: a.scene_revs };
     let mut all: Vec<f64> = Vec::new();
+    let (mut eras, mut civs): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
     let (mut swallowed, mut ejected, mut survived) = (0, 0, 0);
     let median = |v: &mut Vec<f64>| {
         v.sort_by(f64::total_cmp);
@@ -225,6 +227,8 @@ fn planet_stats(a: &Args, count: usize) -> Result<(), String> {
             if k > 0 { ", 1 lasted to the end" } else { "" }
         );
         all.extend(&revs);
+        eras.extend(runs.iter().map(|r| r.2.era as f64));
+        civs.extend(runs.iter().map(|r| r.2.civilisation as f64));
         (swallowed, ejected, survived) = (swallowed + s, ejected + e, survived + k);
     }
     let m = median(&mut all);
@@ -233,6 +237,14 @@ fn planet_stats(a: &Args, count: usize) -> Result<(), String> {
          scene down); {ejected} ejected, {swallowed} swallowed, {survived} lasted to the end of their scene",
         all.len(),
         m * a.seconds_per_rev / PLANET_PACE,
+    );
+    let most = |v: &Vec<f64>| v.iter().copied().fold(0.0, f64::max);
+    println!(
+        "per planet: median {:.0} eras (most {:.0}) and {:.0} civilisations (most {:.0})",
+        median(&mut eras),
+        most(&eras),
+        median(&mut civs),
+        most(&civs)
     );
     Ok(())
 }

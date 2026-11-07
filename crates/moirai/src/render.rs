@@ -18,6 +18,8 @@
 use bytemuck::{Pod, Zeroable};
 use moirai_core::rng::Rng;
 
+use crate::hud::{Hud, HudQuad, temperature_color};
+
 pub struct Gpu {
     /// Kept alive alongside the device and any surfaces created from it.
     #[allow(dead_code)]
@@ -166,10 +168,13 @@ pub struct FrameInput<'a> {
     pub planet: Option<PlanetView<'a>>,
 }
 
-/// The planet as drawn: its recent path (oldest first; `age` runs over the trail) and where it is.
+/// The planet as drawn: its recent path (oldest first; `age` runs over the trail), where it is,
+/// which planet of the scene it is (from 1) and what it has lived through.
 pub struct PlanetView<'a> {
     pub trail: &'a [TrailPoint],
     pub pos: [f32; 2],
+    pub number: u32,
+    pub chronicle: moirai_core::planet::Chronicle,
 }
 
 #[repr(C)]
@@ -263,8 +268,7 @@ const SEG_ANCHOR: f64 = 0.08;
 const TRAIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// The planet's trail: one intensity channel, tinted with the planet's colour in the composite.
 const PLANET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
-/// The planet's colour (linear RGB): a pale blue-white, unlike any sun.
-const PLANET_COLOR: [f32; 4] = [0.62, 0.84, 1.0, 1.0];
+
 /// While the planet is shown the suns' glow is this much smaller, so that it does not drown a
 /// planet circling close to its sun (most of all when a dance zooms out).
 const PLANET_SUN_GLOW: f32 = 0.55;
@@ -372,6 +376,12 @@ pub struct Renderer {
     motes: Instances<Mote>,
     stars: Instances<Star>,
     planet_segs: Instances<Seg>,
+    /// The planet's readout: layout and glyph atlas, its pipeline, atlas binding and quads.
+    hud: Hud,
+    hud_pipeline: wgpu::RenderPipeline,
+    hud_bgl: wgpu::BindGroupLayout,
+    hud_bg: wgpu::BindGroup,
+    hud_quads: Instances<HudQuad>,
     /// Age of every trail point as drawn (scratch, rebuilt every frame).
     ages: [Vec<f32>; 3],
     /// Share of each stardust trail shown, and the time and scene it was last updated for.
@@ -890,6 +900,13 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let hud_bgl = dev.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("hud bgl"),
+            entries: &[texture_entry(2, wgpu::TextureViewDimension::D2, true), sampler_entry(3)],
+        });
+        let hud_pipeline = hud_pipeline(dev, &module, &layout("hud layout", &[Some(&globals_bgl), Some(&hud_bgl)]), format);
+        let hud = Hud::new(width.min(height) as f32);
+        let hud_bg = hud_atlas(gpu, &hud_bgl, &hud);
         let globals_bg = dev.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("globals bg"),
             layout: &globals_bgl,
@@ -920,6 +937,11 @@ impl Renderer {
             motes: Instances::new(dev, "motes", 65536),
             stars: Instances::new(dev, "stars", STAR_COUNT),
             planet_segs: Instances::new(dev, "planet segments", 512),
+            hud,
+            hud_pipeline,
+            hud_bgl,
+            hud_bg,
+            hud_quads: Instances::new(dev, "hud quads", 256),
             ages: Default::default(),
             dust_reach: [1.0; 3],
             dust_clock: None,
@@ -965,6 +987,9 @@ impl Renderer {
         self.height = height;
         self.targets = Self::make_targets(&gpu.device, &self.comp_bgl, &self.globals, &self.smoke_sampler, width, height);
         self.stars_dirty = true;
+        if self.hud.prepare(width.min(height) as f32) {
+            self.hud_bg = hud_atlas(gpu, &self.hud_bgl, &self.hud);
+        }
     }
 
     /// Dust: a mote wherever the path length crosses a multiple of the spacing. Its seed is
@@ -1105,7 +1130,13 @@ impl Renderer {
                 Some(p) => [p.pos[0], p.pos[1], 1.0, 0.0],
                 None => [0.0; 4],
             },
-            planet_color: PLANET_COLOR,
+            planet_color: match &f.planet {
+                Some(p) => {
+                    let [r, g, b] = temperature_color(p.chronicle.temp);
+                    [r, g, b, 1.0]
+                }
+                None => [0.0; 4],
+            },
         };
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -1145,7 +1176,101 @@ impl Renderer {
             pass.set_bind_group(0, &self.targets.comp_bg, &[]);
             pass.draw(0..3, 0..1);
         }
+        if let Some(planet) = &f.planet {
+            self.hud.layout(&mut self.hud_quads.data, h, m, planet.number, &planet.chronicle, f.fade);
+            self.hud_quads.upload(gpu);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("readout"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &self.globals_bg, &[]);
+            pass.set_bind_group(1, &self.hud_bg, &[]);
+            self.hud_quads.draw(&mut pass, &self.hud_pipeline);
+        }
     }
+}
+
+/// The readout's pipeline: quads over the finished frame, blended with premultiplied alpha.
+fn hud_pipeline(
+    dev: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let blend = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    };
+    dev.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("hud pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs_hud"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<HudQuad>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Uint32],
+            })],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some("fs_hud"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState { color: blend, alpha: blend }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Upload the readout's glyph atlas and bind it with a filtering sampler.
+fn hud_atlas(gpu: &Gpu, layout: &wgpu::BindGroupLayout, hud: &Hud) -> wgpu::BindGroup {
+    let size = wgpu::Extent3d { width: hud.atlas_width, height: hud.atlas_height, depth_or_array_layers: 1 };
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("glyph atlas"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        &hud.atlas,
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(hud.atlas_width), rows_per_image: Some(hud.atlas_height) },
+        size,
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = linear_sampler(&gpu.device, "glyph sampler", wgpu::AddressMode::ClampToEdge);
+    gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("hud bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&view) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&sampler) },
+        ],
+    })
 }
 
 /// A render pass that clears `view` to transparent black.

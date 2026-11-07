@@ -20,14 +20,6 @@ frame (smoke currently costs about 2.9 ms more than lines there).
 
 ## Planet
 
-- [ ] Step 2: temperature on a log scale (3 K to 10,000 K, liquid-water band marked; the suns'
-      light with inverse-square falloff, smoothed over about a planet year like thermal
-      inertia), the planet tinted by it, and the era (stable when bound to one sun and the
-      others pull less than about 5% as hard, held for a couple of planet years; chaotic
-      otherwise). A civilisation counter: a civilisation ends when it gets hot enough to boil
-      the oceans or cold enough to freeze the air, and the next starts once it is habitable
-      again; the planet carries on. Needs a small text renderer (an embedded open-licensed
-      font).
 - [ ] Step 3, only if runs feel too short: launch selection by look-ahead (try a few dozen
       launches against the already computed future, keep the longest-lived; never nudge the
       planet itself).

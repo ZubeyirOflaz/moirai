@@ -599,3 +599,51 @@ fn fs_comp(@builtin(position) fc: vec4<f32>) -> @location(0) vec4<f32> {
     }
     return vec4<f32>(mapped, 1.0);
 }
+
+// ---------------------------------------------------------------- readout (over the finished frame)
+
+@group(1) @binding(2) var hud_atlas: texture_2d<f32>;
+@group(1) @binding(3) var hud_smp: sampler;
+
+struct HudIn {
+    @location(0) rect: vec4<f32>,   // px: left, top, right, bottom
+    @location(1) uv: vec4<f32>,     // atlas: left, top, right, bottom
+    @location(2) color: vec4<f32>,  // linear RGB, straight alpha
+    @location(3) kind: u32,         // 0 glyph, 1 solid, 2 round dot
+};
+
+struct HudOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) local: vec2<f32>,
+    @location(2) @interpolate(flat) color: vec4<f32>,
+    @location(3) @interpolate(flat) kind: u32,
+};
+
+@vertex
+fn vs_hud(@builtin(vertex_index) vi: u32, q: HudIn) -> HudOut {
+    let c = quad_corner(vi);
+    let f = 0.5 * (c + vec2<f32>(1.0));
+    var o: HudOut;
+    o.pos = to_clip(mix(q.rect.xy, q.rect.zw, f));
+    o.uv = mix(q.uv.xy, q.uv.zw, f);
+    o.local = c;
+    o.color = q.color;
+    o.kind = q.kind;
+    return o;
+}
+
+@fragment
+fn fs_hud(i: HudOut) -> @location(0) vec4<f32> {
+    var a = i.color.a;
+    if (i.kind == 0u) {
+        a = a * textureSampleLevel(hud_atlas, hud_smp, i.uv, 0.0).r;
+    } else if (i.kind == 2u) {
+        a = a * (1.0 - smoothstep(0.55, 1.0, length(i.local)));
+    }
+    var rgb = i.color.rgb;
+    if (g.encode_srgb > 0.5) {
+        rgb = srgb(rgb); // the target stores encoded values: blend in that space, as UI usually is
+    }
+    return vec4<f32>(rgb * a, a);
+}

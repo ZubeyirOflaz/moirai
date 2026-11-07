@@ -6,6 +6,10 @@
 //! repeatable as they are and is recomputed whenever steering rewrites their future. When it is
 //! swallowed by a star or leaves the system, a new planet starts on a circular orbit in the
 //! habitable zone of the star farthest from the other two.
+//!
+//! Along the way it keeps a chronicle: its surface temperature (the suns' light, with thermal
+//! inertia), whether it lives through a stable or a chaotic era, and its civilisations, which
+//! perish when the seas boil or freeze and rise again once the climate has been mild for a while.
 
 use std::collections::VecDeque;
 use std::f64::consts::TAU;
@@ -25,6 +29,26 @@ pub const SWALLOW_RADIUS: f64 = 1.5 * STAR_RADIUS;
 /// it is still bound (it would be out of sight for a long time).
 pub const EJECT_SPREAD: f64 = 2.0;
 
+/// Surface temperature in a sun's habitable zone with the other suns far away (K): Earth's.
+pub const HZ_TEMP: f64 = 288.0;
+/// How quickly the surface follows the suns' light: its radiated energy (T^4) relaxes toward
+/// the received with this time constant (time units; a year in the habitable zone is about 0.26).
+/// It heats up quickly and cools down slowly.
+const THERMAL_TIME: f64 = 0.3;
+/// Calm: bound to the nearest sun, whose pull the other suns' tides disturb by less than this share.
+const CALM_TIDE: f64 = 0.05;
+/// A stable era begins once it has been calm this long (time units: about two planet years) and
+/// ends after unrest this long.
+const ERA_SETTLE: f64 = 0.6;
+const ERA_BREAK: f64 = 0.12;
+/// A civilisation perishes when the surface gets this hot (the seas boil) or this cold (they
+/// freeze solid), in K ...
+pub const CIV_HOT: f64 = 400.0;
+pub const CIV_COLD: f64 = 180.0;
+/// ... and a new one rises once the climate has stayed mild (between these, K) this long.
+pub const MILD: (f64, f64) = (250.0, 330.0);
+const CIV_RISE: f64 = 1.5;
+
 /// Accuracy: each step is this share of the shortest orbital time scale sqrt(d^3 / G m) to any star.
 const ETA: f64 = 0.015;
 /// A sample of the planet's path is kept at least this often (time units), whenever it has moved
@@ -39,6 +63,109 @@ pub struct Planet {
     pub v: [f64; 2],
     /// Which planet this is: 0 for the first of a scene, counting up with every new start.
     pub run: u32,
+    pub story: Story,
+}
+
+/// What a planet has lived through, as the readout shows it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Chronicle {
+    /// Surface temperature (K).
+    pub temp: f32,
+    /// Whether the current era is stable (bound to one sun, undisturbed) or chaotic.
+    pub stable: bool,
+    /// Eras and civilisations so far on this planet, counting from 1.
+    pub era: u32,
+    pub civilisation: u32,
+    /// Whether that civilisation is alive (otherwise the planet waits for the next).
+    pub alive: bool,
+}
+
+/// The chronicle and what it takes to keep it: how long the conditions for the other kind of era
+/// and for a new civilisation have held.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Story {
+    temp: f64,
+    stable: bool,
+    era: u32,
+    civilisation: u32,
+    alive: bool,
+    unrest: f64,
+    mild: f64,
+}
+
+impl Story {
+    /// A new planet: a stable era and a civilisation from the start.
+    fn new(temp: f64) -> Self {
+        Self { temp, stable: true, era: 1, civilisation: 1, alive: true, unrest: 0.0, mild: 0.0 }
+    }
+
+    pub fn chronicle(&self) -> Chronicle {
+        Chronicle {
+            temp: self.temp as f32,
+            stable: self.stable,
+            era: self.era,
+            civilisation: self.civilisation,
+            alive: self.alive,
+        }
+    }
+
+    /// Live through `h` more time units at equilibrium temperature `teq`, calm or not. Returns
+    /// whether the era or the civilisation changed.
+    fn advance(&mut self, h: f64, teq: f64, calm: bool) -> bool {
+        let (u, ueq) = (self.temp.powi(4), teq.powi(4));
+        self.temp = (ueq + (u - ueq) * (-h / THERMAL_TIME).exp()).powf(0.25);
+        let mut changed = false;
+        self.unrest = if calm == self.stable { 0.0 } else { self.unrest + h };
+        if self.unrest >= if self.stable { ERA_BREAK } else { ERA_SETTLE } {
+            self.stable = !self.stable;
+            self.era += 1;
+            self.unrest = 0.0;
+            changed = true;
+        }
+        if self.alive {
+            if self.temp >= CIV_HOT || self.temp <= CIV_COLD {
+                self.alive = false;
+                self.mild = 0.0;
+                changed = true;
+            }
+        } else {
+            self.mild = if (MILD.0..=MILD.1).contains(&self.temp) { self.mild + h } else { 0.0 };
+            if self.mild >= CIV_RISE {
+                self.alive = true;
+                self.civilisation += 1;
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+/// The surface temperature the suns' light would hold the planet at (K): each sun gives the
+/// habitable-zone warmth at `HZ_RADIUS`, its light falling off with the square of the distance
+/// (and the temperature with the fourth root of the light).
+pub fn equilibrium_temp(stars: &[[f64; 2]; NB], p: [f64; 2]) -> f64 {
+    let light: f64 = stars.iter().map(|s| HZ_RADIUS * HZ_RADIUS / ((s[0] - p[0]).powi(2) + (s[1] - p[1]).powi(2))).sum();
+    HZ_TEMP * light.powf(0.25)
+}
+
+/// Calm: bound to the nearest sun, and the other suns' tides disturb its pull only a little.
+fn calm(model: &Model, stars: &[[f64; 2]; NB], vstars: &[[f64; 2]; NB], b: &Planet) -> bool {
+    let d = |s: [f64; 2]| (s[0] - b.p[0]).hypot(s[1] - b.p[1]);
+    let host = (0..NB).min_by(|&i, &j| d(stars[i]).total_cmp(&d(stars[j]))).unwrap_or(0);
+    let (sh, dh, mh) = (stars[host], d(stars[host]), model.m[host]);
+    let rel = [b.v[0] - vstars[host][0], b.v[1] - vstars[host][1]];
+    if 0.5 * (rel[0] * rel[0] + rel[1] * rel[1]) >= model.g * mh / dh {
+        return false;
+    }
+    let mut tide = [0.0; 2];
+    for j in (0..NB).filter(|&j| j != host) {
+        let (to_p, to_h) = ([stars[j][0] - b.p[0], stars[j][1] - b.p[1]], [stars[j][0] - sh[0], stars[j][1] - sh[1]]);
+        let (rp, rh) = ((to_p[0].hypot(to_p[1])).powi(3), (to_h[0].hypot(to_h[1])).powi(3));
+        for k in 0..2 {
+            tide[k] += model.g * model.m[j] * (to_p[k] / rp - to_h[k] / rh);
+        }
+    }
+    tide[0].hypot(tide[1]) < CALM_TIDE * model.g * mh / (dh * dh)
 }
 
 /// How a planet's run ended.
@@ -57,11 +184,12 @@ pub struct PlanetSample {
     pub run: u32,
     /// Set on the last sample of a run that ended (the next sample starts the new planet).
     pub fate: Option<Fate>,
+    pub chronicle: Chronicle,
 }
 
 impl PlanetSample {
     fn of(t: f64, b: &Planet, fate: Option<Fate>) -> Self {
-        Self { t, p: b.p.map(|x| x as f32), v: b.v.map(|x| x as f32), run: b.run, fate }
+        Self { t, p: b.p.map(|x| x as f32), v: b.v.map(|x| x as f32), run: b.run, fate, chronicle: b.story.chronicle() }
     }
 }
 
@@ -132,10 +260,12 @@ pub fn launch(model: &Model, stars: &[[f64; 2]; NB], vstars: &[[f64; 2]; NB], se
     let turn = if rng.uniform() < 0.5 { 1.0 } else { -1.0 };
     let speed = (model.g * model.m[host] / HZ_RADIUS).sqrt();
     let (s, v) = (stars[host], vstars[host]);
+    let p = [s[0] + HZ_RADIUS * phase.cos(), s[1] + HZ_RADIUS * phase.sin()];
     Planet {
-        p: [s[0] + HZ_RADIUS * phase.cos(), s[1] + HZ_RADIUS * phase.sin()],
+        p,
         v: [v[0] - turn * speed * phase.sin(), v[1] + turn * speed * phase.cos()],
         run,
+        story: Story::new(equilibrium_temp(stars, p)),
     }
 }
 
@@ -204,8 +334,12 @@ impl PlanetSim {
                 self.samples.push_back(PlanetSample::of(t, &b, Some(end)));
                 b = launch(model, &s1, &v1, self.seed, b.run + 1);
                 self.samples.push_back(PlanetSample::of(t, &b, None));
-            } else if self.samples.back().is_none_or(|last| due(last, t, &b)) {
-                self.samples.push_back(PlanetSample::of(t, &b, None));
+            } else {
+                let calm = calm(model, &s1, &v1, &b);
+                let changed = b.story.advance(h, equilibrium_temp(&s1, b.p), calm);
+                if changed || self.samples.back().is_none_or(|last| due(last, t, &b)) {
+                    self.samples.push_back(PlanetSample::of(t, &b, None));
+                }
             }
         }
         self.body = Some(b);
@@ -238,9 +372,9 @@ fn due(last: &PlanetSample, t: f64, b: &Planet) -> bool {
     t - last.t >= SAMPLE_DT || moved >= SAMPLE_DS || turned >= SAMPLE_TURN
 }
 
-/// The planet's position at `t` and which run it belongs to, interpolated from its path (cubic
-/// Hermite between the samples around `t`).
-pub fn planet_at(samples: &VecDeque<PlanetSample>, t: f64) -> Option<([f64; 2], u32)> {
+/// The planet's position at `t`, interpolated from its path (cubic Hermite between the samples
+/// around `t`), and the last sample at or before `t` (its run and chronicle).
+pub fn planet_at(samples: &VecDeque<PlanetSample>, t: f64) -> Option<([f64; 2], PlanetSample)> {
     let n = samples.len();
     if n == 0 || t < samples[0].t - 1e-9 || t > samples[n - 1].t + 1e-9 {
         return None;
@@ -248,7 +382,7 @@ pub fn planet_at(samples: &VecDeque<PlanetSample>, t: f64) -> Option<([f64; 2], 
     let i = samples.partition_point(|s| s.t <= t).saturating_sub(1);
     let a = samples[i];
     let Some(b) = samples.get(i + 1).filter(|b| b.run == a.run && b.t > a.t) else {
-        return Some((a.p.map(f64::from), a.run));
+        return Some((a.p.map(f64::from), a));
     };
     let h = b.t - a.t;
     let s = ((t - a.t) / h).clamp(0.0, 1.0);
@@ -257,7 +391,7 @@ pub fn planet_at(samples: &VecDeque<PlanetSample>, t: f64) -> Option<([f64; 2], 
     let p = std::array::from_fn(|k| {
         h00 * a.p[k] as f64 + h10 * h * a.v[k] as f64 + h01 * b.p[k] as f64 + h11 * h * b.v[k] as f64
     });
-    Some((p, a.run))
+    Some((p, a))
 }
 
 #[cfg(test)]
@@ -295,6 +429,54 @@ mod tests {
         assert!((r - HZ_RADIUS).abs() < 1e-4 * HZ_RADIUS, "radius drifted to {r}");
         let speed = dist(b.v, [y[6], y[7]]);
         assert!((speed - (1.0 / HZ_RADIUS).sqrt()).abs() < 1e-3, "speed {speed}");
+        // a quiet life: Earth's warmth, one stable era, one civilisation
+        let c = b.story.chronicle();
+        assert!((c.temp - 288.0).abs() < 1.0, "{} K", c.temp);
+        assert_eq!((c.stable, c.era, c.civilisation, c.alive), (true, 1, 1, true));
+    }
+
+    #[test]
+    fn eras_and_civilisations_come_and_go() {
+        let mut story = Story::new(HZ_TEMP);
+        let h = 0.01;
+        // a brief disturbance does not end a stable era, a lasting one does
+        story.advance(0.5 * ERA_BREAK, HZ_TEMP, false);
+        assert!(story.stable);
+        story.advance(h, HZ_TEMP, true);
+        for _ in 0..20 {
+            story.advance(h, HZ_TEMP, false);
+        }
+        assert_eq!((story.stable, story.era), (false, 2));
+        // two suns overhead: the seas boil and the civilisation perishes
+        while story.alive {
+            story.advance(h, 2500.0, false);
+        }
+        assert!(story.temp >= CIV_HOT);
+        // calm and mild again for long enough: a new stable era and a new civilisation
+        for _ in 0..1000 {
+            story.advance(h, HZ_TEMP, true);
+        }
+        let c = story.chronicle();
+        assert_eq!((c.stable, c.era, c.civilisation, c.alive), (true, 3, 2, true));
+        assert!((c.temp - 288.0).abs() < 1.0);
+        // heat comes fast, cold slowly
+        let mut warm = Story::new(HZ_TEMP);
+        let mut cool = Story::new(HZ_TEMP);
+        warm.advance(0.1, 600.0, true);
+        cool.advance(0.1, 100.0, true);
+        assert!(warm.temp - HZ_TEMP > HZ_TEMP - cool.temp);
+    }
+
+    #[test]
+    fn the_suns_light_sets_the_temperature() {
+        let one = [[0.0, 0.0], [1e6, 0.0], [-1e6, 0.0]];
+        assert!((equilibrium_temp(&one, [HZ_RADIUS, 0.0]) - HZ_TEMP).abs() < 1e-6);
+        // twice as close: four times the light, the square root of two times the temperature
+        let t = equilibrium_temp(&one, [0.5 * HZ_RADIUS, 0.0]);
+        assert!((t - HZ_TEMP * 2f64.sqrt()).abs() < 1e-6);
+        // two suns at the same distance: the fourth root of two times warmer
+        let two = [[0.0, 0.0], [2.0 * HZ_RADIUS, 0.0], [1e6, 0.0]];
+        assert!((equilibrium_temp(&two, [HZ_RADIUS, 0.0]) - HZ_TEMP * 2f64.powf(0.25)).abs() < 1e-6);
     }
 
     #[test]
@@ -302,7 +484,7 @@ mod tests {
         let (model, y0) = lonely_star();
         let mut sim = PlanetSim::new(9);
         // place it by hand, at rest next to the star at the origin, so it falls straight in
-        let start = Planet { p: [0.05, 0.0], v: [0.0, 0.0], run: 0 };
+        let start = Planet { p: [0.05, 0.0], v: [0.0, 0.0], run: 0, story: Story::new(HZ_TEMP) };
         sim.body = Some(start);
         sim.samples.push_back(PlanetSample::of(0.0, &start, None));
         let y = run(&model, y0, 0.2 * REV, &mut sim);
@@ -320,7 +502,7 @@ mod tests {
         let model = Model::default();
         let (y0, _) = crate::physics::figure_eight();
         let mut sim = PlanetSim::new(4);
-        let start = Planet { p: [0.0, 1.5], v: [0.0, 3.0], run: 0 };
+        let start = Planet { p: [0.0, 1.5], v: [0.0, 3.0], run: 0, story: Story::new(HZ_TEMP) };
         sim.body = Some(start);
         sim.samples.push_back(PlanetSample::of(0.0, &start, None));
         run(&model, y0, 0.2 * REV, &mut sim);
@@ -339,8 +521,8 @@ mod tests {
         let s = &sim.samples;
         for i in 1..s.len() {
             let mid = 0.5 * (s[i - 1].t + s[i].t);
-            let (p, run) = planet_at(s, mid).unwrap();
-            assert_eq!(run, 0);
+            let (p, sample) = planet_at(s, mid).unwrap();
+            assert_eq!(sample.run, 0);
             // halfway between two samples it is still on its circle (the star moves < 1e-4)
             let r = dist(p, [0.0, 0.0]);
             assert!((r - HZ_RADIUS).abs() < 1e-3, "r = {r} at t = {mid}");
