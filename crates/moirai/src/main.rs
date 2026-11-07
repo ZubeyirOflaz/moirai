@@ -7,7 +7,7 @@ mod window;
 
 use std::process::ExitCode;
 
-use engine::{EngineConfig, SceneRequest, snapshot_scene, still_frame};
+use engine::{EngineConfig, SceneRequest, planet_runs, snapshot_scene, still_frame};
 use moirai_core::library::catalog;
 use moirai_core::scene::DirectorConfig;
 use render::{Gpu, Look, OFFSCREEN_FORMAT, Offscreen, PALETTES, Renderer, TrailStyle, instance, palette_index};
@@ -25,6 +25,7 @@ USAGE
 KEYS
   Esc / q  quit      n  next scene      space  pause
   t  trails: smoke -> lines -> stardust  c  next colour palette
+  p  show the planet
 
 OPTIONS
   --scene S            first scene: random | figure8 | choreo:<id> | dance:<seed>
@@ -37,6 +38,10 @@ OPTIONS
                        featured: PALETTES_FEATURED
                        others:   PALETTES_OTHER
   --stars F            starfield brightness (default 1; 0 or --no-stars: plain background)
+  --planet             show the planet: a massless world in the habitable zone of one sun,
+                       replaced by a new one when it hits a star or leaves the system
+  --planet-stats N     simulate N scenes without showing anything and report how long their
+                       planets lasted
   --fps N              frame rate (default 60 in a window, 30 in a terminal)
   --scale F            terminal render resolution relative to the pane (default 1)
   --seed N             random seed
@@ -69,6 +74,7 @@ enum Mode {
     Window,
     Term,
     Snapshot(String),
+    PlanetStats(usize),
     List,
     Help,
 }
@@ -82,7 +88,7 @@ fn parse() -> Result<Args, String> {
         seconds_per_rev: 6.0,
         fps: None,
         scale: 1.0,
-        look: Look { style: TrailStyle::Smoke, stars: 1.0 },
+        look: Look { style: TrailStyle::Smoke, stars: 1.0, planet: false },
         palettes: 0,
         seed: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64),
         size: (1280, 800),
@@ -119,6 +125,8 @@ fn parse() -> Result<Args, String> {
             "--fps" => a.fps = Some(num(it.next(), &k)?.clamp(1.0, 240.0)),
             "--scale" => a.scale = num(it.next(), &k)?.clamp(0.25, 2.0) as f32,
             "--no-stars" => a.look.stars = 0.0,
+            "--planet" => a.look.planet = true,
+            "--planet-stats" => a.mode = Mode::PlanetStats(num(it.next(), &k)?.clamp(1.0, 10_000.0) as usize),
             "--stars" => a.look.stars = num(it.next(), &k)?.clamp(0.0, 10.0) as f32,
             "--trails" => {
                 let v = it.next().ok_or("--trails needs a value")?;
@@ -161,11 +169,12 @@ fn snapshot(a: &Args, path: &str) -> Result<(), String> {
     let mut renderer = Renderer::new(&gpu, OFFSCREEN_FORMAT, w, h);
     let off = Offscreen::new(&gpu, w, h);
     let mut trails = Default::default();
+    let mut planet_path = Vec::new();
     let mut px = vec![0u8; (w * h * 4) as usize];
     for i in 0..a.frames {
         let revs = a.at + i as f64 * revs_per_frame;
         let time = (revs * a.seconds_per_rev) as f32;
-        let input = still_frame(&scene, revs * moirai_core::REV, &mut trails, a.look, a.palettes, time);
+        let input = still_frame(&scene, revs * moirai_core::REV, &mut trails, &mut planet_path, a.look, a.palettes, time);
         let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("snapshot") });
         renderer.render(&gpu, &mut enc, &off.view, &input);
         off.copy_out(&mut enc);
@@ -187,6 +196,42 @@ fn snapshot(a: &Args, path: &str) -> Result<(), String> {
             println!("{} ({}) -> {file_name}", scene.title, input.palette.name);
         }
     }
+    Ok(())
+}
+
+/// Simulate scenes without showing them and report how long their planets lasted.
+fn planet_stats(a: &Args, count: usize) -> Result<(), String> {
+    use moirai_core::planet::Fate;
+    let director = DirectorConfig { dance_share: a.dances, scene_revs: a.scene_revs };
+    let mut all: Vec<f64> = Vec::new();
+    let (mut swallowed, mut ejected, mut survived) = (0, 0, 0);
+    let median = |v: &mut Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v.get(v.len() / 2).copied().unwrap_or(0.0)
+    };
+    for (title, runs) in planet_runs(a.seed, director, a.scene, count) {
+        let mut revs: Vec<f64> = runs.iter().map(|r| r.0).collect();
+        let longest = revs.iter().copied().fold(0.0, f64::max);
+        let n = |f: Option<Fate>| runs.iter().filter(|r| r.1 == f).count();
+        let (s, e, k) = (n(Some(Fate::Swallowed)), n(Some(Fate::Ejected)), n(None));
+        println!(
+            "{title:<44} {:3} planets  median {:5.1} rev  longest {:5.1} rev  {e} ejected, {s} swallowed{}",
+            runs.len(),
+            median(&mut revs),
+            longest,
+            if k > 0 { ", 1 lasted to the end" } else { "" }
+        );
+        all.extend(&revs);
+        (swallowed, ejected, survived) = (swallowed + s, ejected + e, survived + k);
+    }
+    let m = median(&mut all);
+    println!(
+        "\nall {count} scenes: {} planets, median lifetime {m:.1} rev ({:.0} s at {} s per rev); {ejected} ejected, \
+         {swallowed} swallowed, {survived} lasted to the end of their scene",
+        all.len(),
+        m * a.seconds_per_rev,
+        a.seconds_per_rev
+    );
     Ok(())
 }
 
@@ -229,6 +274,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         Mode::Snapshot(path) => snapshot(&a, path),
+        Mode::PlanetStats(n) => planet_stats(&a, *n),
         Mode::Term => term::run(
             cfg,
             term::TermOptions { fps: a.fps.unwrap_or(30.0), scale: a.scale, look: a.look, dry_run: a.dry_run, dry_size: a.size },

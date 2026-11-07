@@ -19,9 +19,11 @@ pub const HZ_RADIUS: f64 = 0.12;
 pub const STAR_RADIUS: f64 = HZ_RADIUS / 215.0;
 /// A planet this close to a star's centre has hit it, or been torn apart by its tides if molten.
 pub const SWALLOW_RADIUS: f64 = 1.5 * STAR_RADIUS;
-/// A planet this far from every star that is no longer bound to the system has left it for good;
-/// one twice as far is given up on either way (it would take ages to come back).
-pub const EJECT_RADIUS: f64 = 5.0;
+/// A planet that is no longer bound to the system has left it for good once it is this many
+/// times the stars' spread (their largest distance from the centre of mass, at least 1) away from
+/// the centre of mass: about where it leaves the picture. One twice as far is given up on even if
+/// it is still bound (it would be out of sight for a long time).
+pub const EJECT_SPREAD: f64 = 2.0;
 
 /// Accuracy: each step is this share of the shortest orbital time scale sqrt(d^3 / G m) to any star.
 const ETA: f64 = 0.015;
@@ -99,25 +101,23 @@ fn accel(model: &Model, stars: &[[f64; 2]; NB], p: [f64; 2]) -> [f64; 2] {
 
 /// Whether the planet's run is over: inside a star, or gone from the system.
 pub fn fate(model: &Model, stars: &[[f64; 2]; NB], vstars: &[[f64; 2]; NB], b: &Planet) -> Option<Fate> {
-    let nearest = stars.iter().map(|s| (s[0] - b.p[0]).hypot(s[1] - b.p[1])).fold(f64::INFINITY, f64::min);
-    if nearest < SWALLOW_RADIUS {
+    if stars.iter().any(|s| (s[0] - b.p[0]).hypot(s[1] - b.p[1]) < SWALLOW_RADIUS) {
         return Some(Fate::Swallowed);
     }
-    if nearest <= EJECT_RADIUS {
-        return None;
-    }
-    if nearest > 2.0 * EJECT_RADIUS {
-        return Some(Fate::Ejected);
-    }
-    // far from every star: gone if it is not bound to the system as a whole
     let mass: f64 = model.m.iter().sum();
     let centre = |v: &[[f64; 2]; NB]| -> [f64; 2] {
         std::array::from_fn(|k| (0..NB).map(|i| model.m[i] * v[i][k]).sum::<f64>() / mass)
     };
     let (c, vc) = (centre(stars), centre(vstars));
+    let spread = stars.iter().map(|s| (s[0] - c[0]).hypot(s[1] - c[1])).fold(1.0, f64::max);
     let r = (b.p[0] - c[0]).hypot(b.p[1] - c[1]);
+    let out = EJECT_SPREAD * spread;
+    if r <= out {
+        return None;
+    }
+    // far out: gone if it is no longer bound to the system as a whole, or very far out
     let energy = 0.5 * ((b.v[0] - vc[0]).powi(2) + (b.v[1] - vc[1]).powi(2)) - model.g * mass / r;
-    (energy > 0.0).then_some(Fate::Ejected)
+    (energy > 0.0 || r > 2.0 * out).then_some(Fate::Ejected)
 }
 
 /// A new planet on a circular orbit in the habitable zone of the star farthest from the other
@@ -316,14 +316,19 @@ mod tests {
 
     #[test]
     fn a_planet_flung_away_is_replaced() {
-        let (model, y0) = lonely_star();
+        // the figure-eight (spread about 1): a planet heading out well above escape speed
+        let model = Model::default();
+        let (y0, _) = crate::physics::figure_eight();
         let mut sim = PlanetSim::new(4);
-        let start = Planet { p: [0.0, 4.9], v: [0.0, 3.0], run: 0 }; // well above escape speed
+        let start = Planet { p: [0.0, 1.5], v: [0.0, 3.0], run: 0 };
         sim.body = Some(start);
         sim.samples.push_back(PlanetSample::of(0.0, &start, None));
         run(&model, y0, 0.2 * REV, &mut sim);
-        let ends: Vec<Fate> = sim.samples.iter().filter_map(|s| s.fate).collect();
-        assert_eq!(ends, vec![Fate::Ejected]);
+        let ends: Vec<(f64, Fate)> = sim.samples.iter().filter_map(|s| Some((s.t, s.fate?))).collect();
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].1, Fate::Ejected);
+        // declared gone once it has passed twice the spread, not long after
+        assert!(ends[0].0 < 0.5, "at t = {}", ends[0].0);
     }
 
     #[test]

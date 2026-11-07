@@ -114,6 +114,8 @@ pub struct Look {
     pub style: TrailStyle,
     /// Starfield brightness (0 = none).
     pub stars: f32,
+    /// Show the planet (see `moirai_core::planet`).
+    pub planet: bool,
 }
 
 /// Dust motes are shed every `DUST_SPACING * radius` of path, where `radius` is the scene's
@@ -160,6 +162,14 @@ pub struct FrameInput<'a> {
     pub path_radius: f64,
     /// Per-scene salt so that every scene has its own dust.
     pub salt: u32,
+    /// The planet, when it is shown.
+    pub planet: Option<PlanetView<'a>>,
+}
+
+/// The planet as drawn: its recent path (oldest first; `age` runs over the trail) and where it is.
+pub struct PlanetView<'a> {
+    pub trail: &'a [TrailPoint],
+    pub pos: [f32; 2],
 }
 
 #[repr(C)]
@@ -197,6 +207,9 @@ struct Globals {
     bodies: [[f32; 4]; 3],
     bg_center: [f32; 4],
     bg_edge: [f32; 4],
+    /// xy: the planet's position (world), z: 1 when it is shown.
+    planet: [f32; 4],
+    planet_color: [f32; 4],
 }
 
 #[repr(C)]
@@ -248,6 +261,13 @@ const MAX_SAG_PX: f32 = 0.3;
 /// of path (about 32 px on an 800 px tall frame), see `segment_end`.
 const SEG_ANCHOR: f64 = 0.08;
 const TRAIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// The planet's trail: one intensity channel, tinted with the planet's colour in the composite.
+const PLANET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+/// The planet's colour (linear RGB): a pale blue-white, unlike any sun.
+const PLANET_COLOR: [f32; 4] = [0.62, 0.84, 1.0, 1.0];
+/// While the planet is shown the suns' glow is this much smaller, so that it does not drown a
+/// planet circling close to its sun (most of all when a dance zooms out).
+const PLANET_SUN_GLOW: f32 = 0.55;
 const STAR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Edge of the smoke noise volume in texels.
 const NOISE_SIZE: u32 = 64;
@@ -324,6 +344,7 @@ struct Targets {
     /// Young smoke at full resolution, older smoke at a lower one.
     smoke_near: wgpu::TextureView,
     smoke_far: wgpu::TextureView,
+    planet: wgpu::TextureView,
     stars: wgpu::TextureView,
     comp_bg: wgpu::BindGroup,
 }
@@ -337,6 +358,7 @@ pub struct Renderer {
     dust_pipeline: wgpu::RenderPipeline,
     smoke_near_pipeline: wgpu::RenderPipeline,
     smoke_far_pipeline: wgpu::RenderPipeline,
+    planet_pipeline: wgpu::RenderPipeline,
     star_pipeline: wgpu::RenderPipeline,
     comp_pipeline: wgpu::RenderPipeline,
     globals_bg: wgpu::BindGroup,
@@ -349,6 +371,7 @@ pub struct Renderer {
     segs: Instances<Seg>,
     motes: Instances<Mote>,
     stars: Instances<Star>,
+    planet_segs: Instances<Seg>,
     /// Age of every trail point as drawn (scratch, rebuilt every frame).
     ages: [Vec<f32>; 3],
     /// Share of each stardust trail shown, and the time and scene it was last updated for.
@@ -769,6 +792,7 @@ impl Renderer {
                 texture_entry(3, wgpu::TextureViewDimension::D2, true),
                 sampler_entry(4),
                 texture_entry(5, wgpu::TextureViewDimension::D2, true),
+                texture_entry(6, wgpu::TextureViewDimension::D2, false),
             ],
         });
         let layout = |label: &str, groups: &[Option<&wgpu::BindGroupLayout>]| {
@@ -811,6 +835,17 @@ impl Renderer {
         };
         let smoke_near_pipeline = smoke_pipeline("smoke near pipeline", ("vs_smoke_near", "fs_smoke_near"));
         let smoke_far_pipeline = smoke_pipeline("smoke far pipeline", ("vs_smoke_far", "fs_smoke_far"));
+        let planet_pipeline = instanced_pipeline(
+            dev,
+            &module,
+            &globals_layout,
+            "planet pipeline",
+            ("vs_planet", "fs_planet"),
+            std::mem::size_of::<Seg>(),
+            &seg_attrs,
+            PLANET_FORMAT,
+            wgpu::BlendOperation::Max,
+        );
         let dust_pipeline = instanced_pipeline(
             dev,
             &module,
@@ -872,6 +907,7 @@ impl Renderer {
             dust_pipeline,
             smoke_near_pipeline,
             smoke_far_pipeline,
+            planet_pipeline,
             star_pipeline,
             comp_pipeline,
             globals_bg,
@@ -883,6 +919,7 @@ impl Renderer {
             segs: Instances::new(dev, "segments", 4096),
             motes: Instances::new(dev, "motes", 65536),
             stars: Instances::new(dev, "stars", STAR_COUNT),
+            planet_segs: Instances::new(dev, "planet segments", 512),
             ages: Default::default(),
             dust_reach: [1.0; 3],
             dust_clock: None,
@@ -902,6 +939,7 @@ impl Renderer {
         // upsampled with bilinear filtering in the composite
         let (fw, fh) = (width.div_ceil(SMOKE_FAR_DIV), height.div_ceil(SMOKE_FAR_DIV));
         let smoke_far = hdr_texture(dev, "smoke far", TRAIL_FORMAT, fw, fh);
+        let planet = hdr_texture(dev, "planet trail", PLANET_FORMAT, width, height);
         let stars = hdr_texture(dev, "starfield", STAR_FORMAT, width, height);
         let comp_bg = dev.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite bg"),
@@ -913,9 +951,10 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&smoke_near) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(smoke_sampler) },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&smoke_far) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&planet) },
             ],
         });
-        Targets { trail, smoke_near, smoke_far, stars, comp_bg }
+        Targets { trail, smoke_near, smoke_far, planet, stars, comp_bg }
     }
 
     pub fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) {
@@ -1003,6 +1042,22 @@ impl Renderer {
             self.build_motes(f);
             self.motes.upload(gpu);
         }
+        // the planet's trail: short and drawn as it is (a segment between every two points)
+        self.planet_segs.data.clear();
+        if let Some(planet) = &f.planet {
+            for w in planet.trail.windows(2).filter(|w| w[0].p != w[1].p) {
+                self.planet_segs.data.push(Seg {
+                    p0: w[0].p,
+                    p1: w[1].p,
+                    ages: [w[0].age, w[1].age],
+                    s: [0.0; 2],
+                    caps: [1.0; 2],
+                    body: 3,
+                    _pad: 0,
+                });
+            }
+            self.planet_segs.upload(gpu);
+        }
         // Motes are shed at a fixed path spacing; when a dance zooms out they crowd together,
         // so dim them to keep the light per unit of screen length roughly constant.
         let spacing_px = (DUST_SPACING * f.path_radius) as f32 * scale;
@@ -1023,7 +1078,7 @@ impl Renderer {
                 TrailStyle::Smoke => 0.22,
             },
             body_core_px: (0.0060 * m).max(2.0),
-            body_halo_px: (0.026 * m).max(6.0),
+            body_halo_px: (0.026 * m).max(6.0) * if f.planet.is_some() { PLANET_SUN_GLOW } else { 1.0 },
             encode_srgb: if self.encode_srgb { 1.0 } else { 0.0 },
             exposure: 1.0,
             stars: f.look.stars,
@@ -1046,6 +1101,11 @@ impl Renderer {
             bodies: std::array::from_fn(|k| [f.bodies[k][0], f.bodies[k][1], 1.0, 0.0]),
             bg_center: BG_CENTER,
             bg_edge: BG_EDGE,
+            planet: match &f.planet {
+                Some(p) => [p.pos[0], p.pos[1], 1.0, 0.0],
+                None => [0.0; 4],
+            },
+            planet_color: PLANET_COLOR,
         };
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -1073,6 +1133,11 @@ impl Renderer {
                 pass.set_bind_group(1, &self.noise_bg, &[]);
                 self.segs.draw(&mut pass, pipeline);
             }
+        }
+        if f.planet.is_some() {
+            let mut pass = begin(encoder, "planet", &self.targets.planet);
+            pass.set_bind_group(0, &self.globals_bg, &[]);
+            self.planet_segs.draw(&mut pass, &self.planet_pipeline);
         }
         {
             let mut pass = begin(encoder, "composite", target);

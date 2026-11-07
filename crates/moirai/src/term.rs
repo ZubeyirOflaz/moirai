@@ -538,6 +538,7 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
                 Event::Key(b'n') => engine.skip(),
                 Event::Key(b' ') => engine.paused = !engine.paused,
                 Event::Key(b't') => look.style = look.style.next(),
+                Event::Key(b'p') => look.planet = !look.planet,
                 Event::Key(b'c') => engine.cycle_palette(),
                 Event::Key(_) => {}
                 Event::Reply { id, ok } => {

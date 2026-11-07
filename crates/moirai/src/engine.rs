@@ -9,10 +9,11 @@ use std::thread;
 use std::time::Duration;
 
 use moirai_core::REV;
+use moirai_core::planet::{PlanetSample, planet_at};
 use moirai_core::scene::{Director, DirectorConfig, Scene};
 use moirai_core::timeline::{Sample, interpolate};
 
-use crate::render::{FrameInput, Look, PALETTES, Palette, TrailPoint};
+use crate::render::{FrameInput, Look, PALETTES, Palette, PlanetView, TrailPoint};
 
 struct AtomicF64(AtomicU64);
 
@@ -38,6 +39,8 @@ pub struct SceneShared {
     display: AtomicF64,
     frontier: AtomicF64,
     samples: Mutex<VecDeque<Sample>>,
+    /// The planet's path (see `moirai_core::planet`).
+    planet: Mutex<VecDeque<PlanetSample>>,
 }
 
 impl SceneShared {
@@ -51,15 +54,23 @@ impl SceneShared {
             display: AtomicF64::new(0.0),
             frontier: AtomicF64::new(s.timeline.frontier()),
             samples: Mutex::new(VecDeque::new()),
+            planet: Mutex::new(VecDeque::new()),
         });
         shared.sync(s);
         shared
     }
 
     fn sync(&self, s: &Scene) {
-        let mut dst = self.samples.lock().expect("samples lock");
-        dst.clear();
-        dst.extend(s.timeline.samples().iter().copied());
+        {
+            let mut dst = self.samples.lock().expect("samples lock");
+            dst.clear();
+            dst.extend(s.timeline.samples().iter().copied());
+        }
+        if let Some(planet) = s.timeline.planet() {
+            let mut dst = self.planet.lock().expect("planet lock");
+            dst.clear();
+            dst.extend(planet.samples.iter().copied());
+        }
         self.frontier.store(s.timeline.frontier());
     }
 }
@@ -92,6 +103,30 @@ pub fn palette_rotation(mask: u32) -> Vec<usize> {
 
 /// Framing radius a free dance is designed around (its camera follows the motion).
 const DANCE_RADIUS: f64 = 1.6;
+
+/// Length of the planet's trail in time units: about two orbits in the habitable zone.
+const PLANET_TRAIL: f64 = 0.45;
+
+/// The planet's recent path up to `t` (of its current run only), oldest first, into `out`, and
+/// where it is at `t`.
+fn planet_trail(samples: &VecDeque<PlanetSample>, t: f64, out: &mut Vec<TrailPoint>) -> Option<[f32; 2]> {
+    out.clear();
+    let (head, run) = planet_at(samples, t)?;
+    let start = samples.partition_point(|s| s.t < t - PLANET_TRAIL).saturating_sub(1);
+    for p in samples.iter().skip(start).take_while(|p| p.t <= t).filter(|p| p.run == run) {
+        let age = ((t - p.t) / PLANET_TRAIL).clamp(0.0, 1.0) as f32;
+        push_point(out, p.p, age);
+    }
+    let head = [head[0] as f32, head[1] as f32];
+    push_point(out, head, 0.0);
+    Some(head)
+}
+
+/// Append a trail point, measuring the path length along the way.
+fn push_point(trail: &mut Vec<TrailPoint>, p: [f32; 2], age: f32) {
+    let s = trail.last().map_or(0.0, |l| l.s + ((p[0] - l.p[0]) as f64).hypot((p[1] - l.p[1]) as f64));
+    trail.push(TrailPoint { p, age, s });
+}
 
 /// Per-scene salt for the dust, derived from the scene's random palette pick.
 fn dust_salt(palette: u32) -> u32 {
@@ -172,6 +207,7 @@ pub struct Engine {
     palette_shift: usize,
     trails: [Vec<TrailPoint>; 3],
     bodies: [[f32; 2]; 3],
+    planet_trail: Vec<TrailPoint>,
 }
 
 fn smoothstep(e0: f64, e1: f64, x: f64) -> f64 {
@@ -205,6 +241,7 @@ impl Engine {
             palette_shift: 0,
             trails: Default::default(),
             bodies: [[0.0; 2]; 3],
+            planet_trail: Vec::new(),
         }
     }
 
@@ -305,6 +342,11 @@ impl Engine {
         if cur.frame_radius.is_some() {
             self.radius = self.radius_target;
         }
+        let planet = if look.planet {
+            planet_trail(&cur.planet.lock().expect("planet lock"), t, &mut self.planet_trail)
+        } else {
+            None
+        };
         FrameInput {
             trails: [&self.trails[0], &self.trails[1], &self.trails[2]],
             bodies: self.bodies,
@@ -316,16 +358,14 @@ impl Engine {
             look,
             path_radius: cur.frame_radius.unwrap_or(DANCE_RADIUS),
             salt: dust_salt(cur.palette),
+            planet: planet.map(|pos| PlanetView { trail: &self.planet_trail, pos }),
         }
     }
 }
 
 /// Append the interpolated current position as the newest trail point.
 fn push_head(trail: &mut Vec<TrailPoint>, p: [f32; 2]) {
-    let s = trail.last().map_or(0.0, |l| {
-        l.s + ((p[0] - l.p[0]) as f64).hypot((p[1] - l.p[1]) as f64)
-    });
-    trail.push(TrailPoint { p, age: 0.0, s });
+    push_point(trail, p, 0.0);
 }
 
 impl Drop for Engine {
@@ -337,6 +377,41 @@ impl Drop for Engine {
             let _ = h.join();
         }
     }
+}
+
+/// How long each planet of a scene lasted (revolutions) and how it ended (`None`: still there
+/// when the scene ended).
+pub type PlanetRuns = Vec<(f64, Option<moirai_core::planet::Fate>)>;
+
+/// Simulate `count` scenes (the first as requested, then as the director picks them) and return
+/// each one's title and planet runs.
+pub fn planet_runs(seed: u64, director: DirectorConfig, first: SceneRequest, count: usize) -> Vec<(String, PlanetRuns)> {
+    let mut d = Director::new(seed, director);
+    (0..count)
+        .map(|i| {
+            let mut scene = make_scene(&mut d, if i == 0 { first } else { SceneRequest::Random });
+            let mut display = 0.0;
+            while display < scene.duration {
+                display += REV;
+                scene.timeline.fill(display, display + scene.lookahead, false);
+            }
+            let mut runs = Vec::new();
+            if let Some(planet) = scene.timeline.planet() {
+                let mut start: Option<f64> = None;
+                for s in planet.samples.iter().take_while(|s| s.t <= scene.duration) {
+                    let begun = *start.get_or_insert(s.t);
+                    if s.fate.is_some() {
+                        runs.push(((s.t - begun) / REV, s.fate));
+                        start = None;
+                    }
+                }
+                if let Some(begun) = start {
+                    runs.push(((scene.duration - begun) / REV, None));
+                }
+            }
+            (scene.title, runs)
+        })
+        .collect()
 }
 
 /// Build a single frame synchronously at scene time `at_revs` (for snapshots and tests).
@@ -358,6 +433,7 @@ pub fn still_frame<'a>(
     scene: &Scene,
     t: f64,
     trails: &'a mut [Vec<TrailPoint>; 3],
+    planet_path: &'a mut Vec<TrailPoint>,
     look: Look,
     palettes: u32,
     time: f32,
@@ -384,6 +460,10 @@ pub fn still_frame<'a>(
     }
     let radius = scene.frame_radius.unwrap_or((rmax * 1.18).clamp(1.1, 3.5));
     let rotation = palette_rotation(palettes);
+    let planet = match scene.timeline.planet() {
+        Some(p) if look.planet => planet_trail(&p.samples, t, planet_path),
+        _ => None,
+    };
     FrameInput {
         trails: [&trails[0], &trails[1], &trails[2]],
         bodies,
@@ -395,5 +475,6 @@ pub fn still_frame<'a>(
         look,
         path_radius: scene.frame_radius.unwrap_or(DANCE_RADIUS),
         salt: dust_salt(scene.palette),
+        planet: planet.map(|pos| PlanetView { trail: &planet_path[..], pos }),
     }
 }

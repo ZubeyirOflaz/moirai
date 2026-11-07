@@ -34,7 +34,8 @@ cargo build --release
 ./target/release/moirai --term     # inside the current terminal pane (Ghostty, kitty, WezTerm)
 ```
 
-Keys: `Esc`/`q` quit · `n` next scene · `space` pause · `t` smoke → lines → stardust · `c` next palette.
+Keys: `Esc`/`q` quit · `n` next scene · `space` pause · `t` smoke → lines → stardust · `c` next palette ·
+`p` planet.
 See `moirai --help` for all options, `moirai --list` for the choreographies, and
 `moirai --snapshot frame.png --scene choreo:2` for a still.
 
@@ -55,6 +56,13 @@ See `moirai --help` for all options, `moirai --list` for the choreographies, and
 - **Stars**: about 1800 on a 16:10 frame, with power-law brightness and size, slowly breathing;
   they stay put while scenes fade. `--stars 1.5` brightens them (useful on a dim screen),
   `--stars 0` or `--no-stars` removes them.
+- **Planet** (`p` or `--planet`): a massless world among the three suns, in the spirit of
+  Trisolaris. The suns pull it, it pulls nothing, and nothing steers it. Each planet starts on a
+  circular orbit in the habitable zone of the sun farthest from the other two. When it falls
+  into a sun or is flung out of the system, the next planet starts the same way, so one system
+  shows many planetary histories. Most last a few to a few dozen seconds; `moirai
+  --planet-stats 20` simulates twenty scenes and reports how long their planets lasted. While
+  it is shown, the suns' glow is smaller, so that it does not hide a planet close to its sun.
 
 ### In a Ghostty split
 
@@ -114,6 +122,10 @@ data/                the stable-orbit catalogue
   smallest one whose future is clean.
 - `timeline` / `engine` — a background thread keeps each scene computed ahead of the display
   and sleeps otherwise; scenes fade in and out.
+- `planet` — the restricted four-body problem: inside each step of the stars the planet takes
+  its own small steps, reading the stars' positions from that step's dense output, so the stars
+  are untouched and steering rewrites recompute the planet too. Its losses and restarts are
+  decided ahead of the display like everything else.
 - Rendering — each body's trail goes into its own channel of an HDR texture. The trail is cut
   into the longest segments that stay within 0.3 px of the path (few segments, little
   overdraw), and the timeline records how far every body has travelled, so effects can be
@@ -135,7 +147,8 @@ data/                the stable-orbit catalogue
 `cargo test --release` covers orbit closure and conservation, bit-identical restarts,
 conservation-preserving nudges, steered runs replaying cleanly, the real-time timeline, and the
 terminal input parser (keys versus graphics replies), the smoke noise volume (tiling and
-normalisation) and how stardust fades by turning.
+normalisation), how stardust fades by turning, and the planet (stable orbits, losses and
+restarts, a path that leaves the stars bit-for-bit unchanged and repeats exactly).
 
 ## Credits
 

@@ -36,6 +36,8 @@ struct Globals {
     bodies: array<vec4<f32>, 3>,   // xy: position (world), z: brightness
     bg_center: vec4<f32>,
     bg_edge: vec4<f32>,
+    planet: vec4<f32>,             // xy: position (world), z: 1 when shown
+    planet_color: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -422,6 +424,57 @@ fn fs_mote(i: MoteOut) -> @location(0) vec4<f32> {
     return body_channel(i.body, v, v * i.hot);
 }
 
+// ---------------------------------------------------------------- planet
+
+struct PlanetOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) px: vec2<f32>,
+    @location(1) @interpolate(flat) a: vec2<f32>,
+    @location(2) @interpolate(flat) b: vec2<f32>,
+    @location(3) @interpolate(flat) ages: vec2<f32>,
+};
+
+// The planet's trail is a finer thread than the suns'.
+fn planet_core_px() -> f32 {
+    return max(0.6 * g.core_px, 0.8);
+}
+
+fn planet_glow_px() -> f32 {
+    return max(0.45 * g.glow_px, 1.5);
+}
+
+@vertex
+fn vs_planet(@builtin(vertex_index) vi: u32, s: Seg) -> PlanetOut {
+    let a = to_px(s.p0);
+    let b = to_px(s.p1);
+    let p = capsule_corner(a, b, planet_core_px() + 2.6 * planet_glow_px() + 1.0, vi);
+    var o: PlanetOut;
+    o.pos = to_clip(p);
+    o.px = p;
+    o.a = a;
+    o.b = b;
+    o.ages = s.ages;
+    return o;
+}
+
+@fragment
+fn fs_planet(i: PlanetOut) -> @location(0) vec4<f32> {
+    let ab = i.b - i.a;
+    let l2 = max(dot(ab, ab), 1e-6);
+    let t = clamp(dot(i.px - i.a, ab) / l2, 0.0, 1.0);
+    let d = length(i.px - (i.a + ab * t));
+    let life = 1.0 - mix(i.ages.x, i.ages.y, t);
+    if (life <= 0.0) {
+        discard;
+    }
+    let fade = life * life * (3.0 - 2.0 * life);
+    let w = planet_core_px() * (0.4 + 0.6 * life);
+    let core = 1.0 - smoothstep(w - 0.6, w + 0.6, d);
+    let gw = planet_glow_px();
+    let glow = 0.35 * exp(-(d * d) / (gw * gw));
+    return vec4<f32>(fade * (0.9 * core + glow), 0.0, 0.0, 0.0);
+}
+
 // ---------------------------------------------------------------- starfield (drawn once per size)
 
 struct StarIn {
@@ -471,6 +524,7 @@ fn fs_star(i: StarOut) -> @location(0) vec4<f32> {
 @group(0) @binding(3) var smoke_near_tex: texture_2d<f32>;
 @group(0) @binding(4) var smoke_smp: sampler;
 @group(0) @binding(5) var smoke_far_tex: texture_2d<f32>;
+@group(0) @binding(6) var planet_tex: texture_2d<f32>;
 
 @vertex
 fn vs_full(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -526,6 +580,16 @@ fn fs_comp(@builtin(position) fc: vec4<f32>) -> @location(0) vec4<f32> {
         let halo = exp(-(d * d) / (hr * hr));
         let tail = 0.16 * hr * hr / (d * d + hr * hr);
         fg += c * (1.5 * halo + tail) + mix(c, vec3<f32>(g.bodies[k].z), 0.7) * core * 2.8;
+    }
+    if (g.planet.z > 0.5) {
+        // its trail, then the planet itself: a small bright dot with a little glow
+        let pc = g.planet_color.rgb;
+        fg += pc * textureLoad(planet_tex, ip, 0).r;
+        let d = length(px - to_px(g.planet.xy));
+        let r = max(0.4 * g.body_core_px, 1.2);
+        let hr = max(0.25 * g.body_halo_px, 2.5);
+        let core = 1.0 - smoothstep(r - 0.7, r + 0.7, d);
+        fg += pc * (0.8 * exp(-(d * d) / (hr * hr))) + mix(pc, vec3<f32>(1.0), 0.6) * core * 2.0;
     }
     col += fg * g.fade;
     var mapped = vec3<f32>(1.0) - exp(-col * g.exposure);

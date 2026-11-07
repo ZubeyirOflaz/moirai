@@ -123,6 +123,7 @@ impl ApplicationHandler for App {
                         }
                     }
                     Key::Character("t") => self.opts.look.style = self.opts.look.style.next(),
+                    Key::Character("p") => self.opts.look.planet = !self.opts.look.planet,
                     Key::Character("c") => {
                         if let Some(e) = self.engine.as_mut() {
                             e.cycle_palette();
