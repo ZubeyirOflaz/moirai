@@ -13,7 +13,7 @@ use moirai_core::planet::{PlanetSample, planet_at};
 use moirai_core::scene::{Director, DirectorConfig, Scene};
 use moirai_core::timeline::{Sample, interpolate};
 
-use crate::render::{FrameInput, Look, PALETTES, Palette, PlanetView, TrailPoint};
+use crate::render::{FrameInput, HistoryPoint, Look, PALETTES, Palette, PlanetView, TrailPoint};
 
 struct AtomicF64(AtomicU64);
 
@@ -104,12 +104,44 @@ pub fn palette_rotation(mask: u32) -> Vec<usize> {
 /// Framing radius a free dance is designed around (its camera follows the motion).
 const DANCE_RADIUS: f64 = 1.6;
 
-/// Length of the planet's trail in time units: four to five orbits in the habitable zone.
-const PLANET_TRAIL: f64 = 1.2;
+/// Length of the planet's trail in time units: about two orbits in the habitable zone.
+const PLANET_TRAIL: f64 = 0.6;
+/// How far back the readout's temperature graph reaches (time units; about 36 s on screen with
+/// the planet shown at the default speed), and about how many points it is drawn from.
+const HISTORY: f64 = 3.0 * REV;
+const HISTORY_POINTS: usize = 160;
+
+/// Storage for the paths a frame draws, reused from frame to frame.
+#[derive(Default)]
+pub struct Paths {
+    trails: [Vec<TrailPoint>; 3],
+    planet: Vec<TrailPoint>,
+    history: Vec<HistoryPoint>,
+}
 
 /// With the planet shown the scene runs at this share of its normal speed: otherwise the planet
 /// circles its sun several times a second and its orbit is hard to follow.
 pub const PLANET_PACE: f64 = 0.5;
+
+/// The planet's temperature over the `HISTORY` before `t`, thinned to about `HISTORY_POINTS`
+/// points but keeping every change of planet, into `out` (oldest first), ending with `now`.
+fn planet_history(samples: &VecDeque<PlanetSample>, t: f64, now: &PlanetSample, out: &mut Vec<HistoryPoint>) {
+    out.clear();
+    let t0 = t - HISTORY;
+    let step = HISTORY / HISTORY_POINTS as f64;
+    let mut next = t0;
+    let mut prev_run = None;
+    let start = samples.partition_point(|s| s.t < t0);
+    for s in samples.iter().skip(start).take_while(|s| s.t < t) {
+        let boundary = s.fate.is_some() || prev_run.is_some_and(|r| r != s.run);
+        if s.t >= next || boundary {
+            out.push(HistoryPoint::of(((s.t - t0) / HISTORY) as f32, s));
+            next = s.t + step;
+        }
+        prev_run = Some(s.run);
+    }
+    out.push(HistoryPoint::of(1.0, now));
+}
 
 /// The planet's recent path up to `t` (of its current run only), oldest first, into `out`, and
 /// where it is at `t` with its latest sample (run and chronicle).
@@ -211,9 +243,8 @@ pub struct Engine {
     pace: f64,
     /// Palette steps taken with the cycle key in the current scene.
     palette_shift: usize,
-    trails: [Vec<TrailPoint>; 3],
+    paths: Paths,
     bodies: [[f32; 2]; 3],
-    planet_trail: Vec<TrailPoint>,
 }
 
 fn smoothstep(e0: f64, e1: f64, x: f64) -> f64 {
@@ -246,9 +277,8 @@ impl Engine {
             rotation: palette_rotation(cfg.palettes),
             pace: 1.0,
             palette_shift: 0,
-            trails: Default::default(),
+            paths: Paths::default(),
             bodies: [[0.0; 2]; 3],
-            planet_trail: Vec::new(),
         }
     }
 
@@ -317,7 +347,7 @@ impl Engine {
         let cur = self.current.clone();
         let t = self.clock;
         let trail = cur.trail;
-        for v in &mut self.trails {
+        for v in &mut self.paths.trails {
             v.clear();
         }
         let mut rmax: f64 = 0.0;
@@ -332,12 +362,12 @@ impl Engine {
                 }
                 let age = ((t - s.t) / trail).clamp(0.0, 1.0) as f32;
                 for b in 0..3 {
-                    self.trails[b].push(TrailPoint { p: s.p[b], age, s: s.s[b] });
+                    self.paths.trails[b].push(TrailPoint { p: s.p[b], age, s: s.s[b] });
                     rmax = rmax.max((s.p[b][0] as f64).hypot(s.p[b][1] as f64));
                 }
             }
             if let Some(pos) = interpolate(n, t, |i| samples[i]) {
-                for ((trail, body), q) in self.trails.iter_mut().zip(&mut self.bodies).zip(pos) {
+                for ((trail, body), q) in self.paths.trails.iter_mut().zip(&mut self.bodies).zip(pos) {
                     let p = [q[0] as f32, q[1] as f32];
                     push_head(trail, p);
                     *body = p;
@@ -352,12 +382,19 @@ impl Engine {
             self.radius = self.radius_target;
         }
         let planet = if look.planet {
-            planet_trail(&cur.planet.lock().expect("planet lock"), t, &mut self.planet_trail)
+            let samples = cur.planet.lock().expect("planet lock");
+            let now = planet_trail(&samples, t, &mut self.paths.planet);
+            if let Some((_, sample)) = &now {
+                planet_history(&samples, t, sample, &mut self.paths.history);
+            }
+            now
         } else {
             None
         };
+        let history_seconds = (HISTORY / self.speed()) as f32;
+        let paths = &self.paths;
         FrameInput {
-            trails: [&self.trails[0], &self.trails[1], &self.trails[2]],
+            trails: [&paths.trails[0], &paths.trails[1], &paths.trails[2]],
             bodies: self.bodies,
             center: [0.0, 0.0],
             radius: self.radius as f32,
@@ -367,7 +404,14 @@ impl Engine {
             look,
             path_radius: cur.frame_radius.unwrap_or(DANCE_RADIUS),
             salt: dust_salt(cur.palette),
-            planet: planet.map(|(pos, now)| PlanetView { trail: &self.planet_trail, pos, number: now.run + 1, chronicle: now.chronicle }),
+            planet: planet.map(|(pos, now)| PlanetView {
+                trail: &paths.planet,
+                pos,
+                number: now.run + 1,
+                chronicle: now.chronicle,
+                history: &paths.history,
+                history_seconds,
+            }),
         }
     }
 }
@@ -439,26 +483,27 @@ pub fn snapshot_scene(req: SceneRequest, seed: u64, at_revs: f64) -> (Scene, f64
 }
 
 /// Frame input for a scene computed synchronously (snapshots). `palettes` is the rotation as
-/// in `EngineConfig`; `time` drives the twinkling.
+/// in `EngineConfig`; `time` drives the twinkling; `seconds_per_rev` is the screen time of a
+/// revolution (with the planet's slower pace already applied).
 pub fn still_frame<'a>(
     scene: &Scene,
     t: f64,
-    trails: &'a mut [Vec<TrailPoint>; 3],
-    planet_path: &'a mut Vec<TrailPoint>,
+    paths: &'a mut Paths,
     look: Look,
     palettes: u32,
     time: f32,
+    seconds_per_rev: f64,
 ) -> FrameInput<'a> {
     let samples = scene.timeline.samples();
     let trail = scene.trail;
     let mut bodies = [[0.0f32; 2]; 3];
     let mut rmax: f64 = 0.0;
-    for v in trails.iter_mut() {
+    for v in paths.trails.iter_mut() {
         v.clear();
     }
     for s in samples.iter().filter(|s| s.t >= t - trail && s.t <= t) {
         let age = ((t - s.t) / trail) as f32;
-        for (b, trail) in trails.iter_mut().enumerate() {
+        for (b, trail) in paths.trails.iter_mut().enumerate() {
             trail.push(TrailPoint { p: s.p[b], age, s: s.s[b] });
             rmax = rmax.max((s.p[b][0] as f64).hypot(s.p[b][1] as f64));
         }
@@ -466,17 +511,25 @@ pub fn still_frame<'a>(
     if let Some(pos) = interpolate(samples.len(), t, |i| samples[i]) {
         for b in 0..3 {
             bodies[b] = [pos[b][0] as f32, pos[b][1] as f32];
-            push_head(&mut trails[b], bodies[b]);
+            push_head(&mut paths.trails[b], bodies[b]);
         }
     }
     let radius = scene.frame_radius.unwrap_or((rmax * 1.18).clamp(1.1, 3.5));
     let rotation = palette_rotation(palettes);
     let planet = match scene.timeline.planet() {
-        Some(p) if look.planet => planet_trail(&p.samples, t, planet_path),
+        Some(p) if look.planet => {
+            let now = planet_trail(&p.samples, t, &mut paths.planet);
+            if let Some((_, sample)) = &now {
+                planet_history(&p.samples, t, sample, &mut paths.history);
+            }
+            now
+        }
         _ => None,
     };
+    let history_seconds = (HISTORY / REV * seconds_per_rev) as f32;
+    let paths = &*paths;
     FrameInput {
-        trails: [&trails[0], &trails[1], &trails[2]],
+        trails: [&paths.trails[0], &paths.trails[1], &paths.trails[2]],
         bodies,
         center: [0.0, 0.0],
         radius: radius as f32,
@@ -486,6 +539,13 @@ pub fn still_frame<'a>(
         look,
         path_radius: scene.frame_radius.unwrap_or(DANCE_RADIUS),
         salt: dust_salt(scene.palette),
-        planet: planet.map(|(pos, now)| PlanetView { trail: &planet_path[..], pos, number: now.run + 1, chronicle: now.chronicle }),
+        planet: planet.map(|(pos, now)| PlanetView {
+            trail: &paths.planet,
+            pos,
+            number: now.run + 1,
+            chronicle: now.chronicle,
+            history: &paths.history,
+            history_seconds,
+        }),
     }
 }

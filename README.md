@@ -59,19 +59,22 @@ See `moirai --help` for all options, `moirai --list` for the choreographies, and
 - **Planet** (`p` or `--planet`): a massless world among the three suns, in the spirit of
   Trisolaris. The suns pull it, it pulls nothing, and nothing steers it. Each planet starts on a
   circular orbit in the habitable zone of the sun farthest from the other two. When it falls
-  into a sun or is flung out of the system, the next planet starts the same way, so one system
+  into a sun, is flung out of the system, or is caught in a scorching orbit close to a sun (over
+  700 K for a few seconds, lost in its glare), the next planet starts the same way, so one system
   shows many planetary histories. Most last a few to a few dozen seconds; `moirai
   --planet-stats 20` simulates twenty scenes and reports how long their planets lasted. While
   it is shown the scene runs at half speed, so that its orbit can be followed, and the suns'
   glow is smaller, so that it does not hide a planet close to its sun.
 
-  A readout in the corner tells its story. The era is **stable** while the planet is bound to
-  one sun and the others barely disturb it, and **chaotic** otherwise. Counters show the eras,
-  civilisations and planets so far, and a gauge shows the surface temperature on a log scale
-  from 3 K to 10,000 K, with the liquid-water band marked. The temperature comes from the three
-  suns' light, with some thermal inertia, and tints the planet. A civilisation perishes when
-  the seas boil (400 K) or freeze solid (180 K); the planet carries on, and a new civilisation
-  rises once the climate has stayed mild for a few planet years.
+  A readout in the top-right corner tells its story. The era is **stable** while the planet is
+  bound to one sun and the others barely disturb it, and **chaotic** otherwise; below it, which
+  era of which planet this is and whether its civilisation lives. A graph shows the surface
+  temperature over the last half minute on a log scale (10 K to 10,000 K), with the band where a
+  civilisation can live, the eras shaded along the time axis, and a line where one planet was
+  lost and the next began. The temperature comes from the three suns' light, with some thermal
+  inertia, and tints the planet. A civilisation perishes when the seas boil (400 K) or freeze
+  solid (180 K); the planet carries on, and a new civilisation rises once the climate has stayed
+  mild for a few planet years.
 
 ### In a Ghostty split
 

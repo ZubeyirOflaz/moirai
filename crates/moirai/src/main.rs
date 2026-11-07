@@ -8,7 +8,7 @@ mod window;
 
 use std::process::ExitCode;
 
-use engine::{EngineConfig, PLANET_PACE, SceneRequest, planet_runs, snapshot_scene, still_frame};
+use engine::{EngineConfig, PLANET_PACE, Paths, SceneRequest, planet_runs, snapshot_scene, still_frame};
 use moirai_core::library::catalog;
 use moirai_core::scene::DirectorConfig;
 use render::{Gpu, Look, OFFSCREEN_FORMAT, Offscreen, PALETTES, Renderer, TrailStyle, instance, palette_index};
@@ -172,13 +172,12 @@ fn snapshot(a: &Args, path: &str) -> Result<(), String> {
     let (scene, _) = snapshot_scene(a.scene, a.seed, last);
     let mut renderer = Renderer::new(&gpu, OFFSCREEN_FORMAT, w, h);
     let off = Offscreen::new(&gpu, w, h);
-    let mut trails = Default::default();
-    let mut planet_path = Vec::new();
+    let mut paths = Paths::default();
     let mut px = vec![0u8; (w * h * 4) as usize];
     for i in 0..a.frames {
         let revs = a.at + i as f64 * revs_per_frame;
         let time = (revs * seconds_per_rev) as f32;
-        let input = still_frame(&scene, revs * moirai_core::REV, &mut trails, &mut planet_path, a.look, a.palettes, time);
+        let input = still_frame(&scene, revs * moirai_core::REV, &mut paths, a.look, a.palettes, time, seconds_per_rev);
         let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("snapshot") });
         renderer.render(&gpu, &mut enc, &off.view, &input);
         off.copy_out(&mut enc);
@@ -209,7 +208,7 @@ fn planet_stats(a: &Args, count: usize) -> Result<(), String> {
     let director = DirectorConfig { dance_share: a.dances, scene_revs: a.scene_revs };
     let mut all: Vec<f64> = Vec::new();
     let (mut eras, mut civs): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
-    let (mut swallowed, mut ejected, mut survived) = (0, 0, 0);
+    let (mut swallowed, mut ejected, mut survived, mut scorched) = (0, 0, 0, 0);
     let median = |v: &mut Vec<f64>| {
         v.sort_by(f64::total_cmp);
         v.get(v.len() / 2).copied().unwrap_or(0.0)
@@ -219,8 +218,10 @@ fn planet_stats(a: &Args, count: usize) -> Result<(), String> {
         let longest = revs.iter().copied().fold(0.0, f64::max);
         let n = |f: Option<Fate>| runs.iter().filter(|r| r.1 == f).count();
         let (s, e, k) = (n(Some(Fate::Swallowed)), n(Some(Fate::Ejected)), n(None));
+        let burnt = n(Some(Fate::Scorched));
+        scorched += burnt;
         println!(
-            "{title:<44} {:3} planets  median {:5.1} rev  longest {:5.1} rev  {e} ejected, {s} swallowed{}",
+            "{title:<44} {:3} planets  median {:5.1} rev  longest {:5.1} rev  {e} ejected, {s} swallowed, {burnt} scorched{}",
             runs.len(),
             median(&mut revs),
             longest,
@@ -234,7 +235,8 @@ fn planet_stats(a: &Args, count: usize) -> Result<(), String> {
     let m = median(&mut all);
     println!(
         "\nall {count} scenes: {} planets, median lifetime {m:.1} rev ({:.0} s on screen, where the planet slows the \
-         scene down); {ejected} ejected, {swallowed} swallowed, {survived} lasted to the end of their scene",
+         scene down); {ejected} ejected, {swallowed} swallowed, {scorched} scorched, {survived} lasted to the end of \
+         their scene",
         all.len(),
         m * a.seconds_per_rev / PLANET_PACE,
     );

@@ -48,6 +48,11 @@ pub const CIV_COLD: f64 = 180.0;
 /// ... and a new one rises once the climate has stayed mild (between these, K) this long.
 pub const MILD: (f64, f64) = (250.0, 330.0);
 const CIV_RISE: f64 = 1.5;
+/// A planet whose surface stays this hot (K) for this long (time units) has been caught in a
+/// scorching orbit close to its sun, lost in its glare: its run ends. Brief passes this hot, even
+/// far hotter, are survived.
+pub const SCORCH_TEMP: f64 = 700.0;
+const SCORCH_TIME: f64 = 1.5;
 
 /// Accuracy: each step is this share of the shortest orbital time scale sqrt(d^3 / G m) to any star.
 const ETA: f64 = 0.015;
@@ -91,12 +96,19 @@ pub struct Story {
     alive: bool,
     unrest: f64,
     mild: f64,
+    /// How long it has been scorching hot without a break.
+    scorching: f64,
 }
 
 impl Story {
     /// A new planet: a stable era and a civilisation from the start.
     fn new(temp: f64) -> Self {
-        Self { temp, stable: true, era: 1, civilisation: 1, alive: true, unrest: 0.0, mild: 0.0 }
+        Self { temp, stable: true, era: 1, civilisation: 1, alive: true, unrest: 0.0, mild: 0.0, scorching: 0.0 }
+    }
+
+    /// Whether it has been scorching hot for so long that the planet is lost to its sun.
+    pub fn scorched(&self) -> bool {
+        self.scorching >= SCORCH_TIME
     }
 
     pub fn chronicle(&self) -> Chronicle {
@@ -114,6 +126,7 @@ impl Story {
     fn advance(&mut self, h: f64, teq: f64, calm: bool) -> bool {
         let (u, ueq) = (self.temp.powi(4), teq.powi(4));
         self.temp = (ueq + (u - ueq) * (-h / THERMAL_TIME).exp()).powf(0.25);
+        self.scorching = if self.temp >= SCORCH_TEMP { self.scorching + h } else { 0.0 };
         let mut changed = false;
         self.unrest = if calm == self.stable { 0.0 } else { self.unrest + h };
         if self.unrest >= if self.stable { ERA_BREAK } else { ERA_SETTLE } {
@@ -171,8 +184,12 @@ fn calm(model: &Model, stars: &[[f64; 2]; NB], vstars: &[[f64; 2]; NB], b: &Plan
 /// How a planet's run ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fate {
+    /// It reached a sun.
     Swallowed,
+    /// It left the system.
     Ejected,
+    /// It stayed in a scorching orbit close to a sun (see `SCORCH_TEMP`).
+    Scorched,
 }
 
 /// One point of the planet's path.
@@ -337,7 +354,11 @@ impl PlanetSim {
             } else {
                 let calm = calm(model, &s1, &v1, &b);
                 let changed = b.story.advance(h, equilibrium_temp(&s1, b.p), calm);
-                if changed || self.samples.back().is_none_or(|last| due(last, t, &b)) {
+                if b.story.scorched() {
+                    self.samples.push_back(PlanetSample::of(t, &b, Some(Fate::Scorched)));
+                    b = launch(model, &s1, &v1, self.seed, b.run + 1);
+                    self.samples.push_back(PlanetSample::of(t, &b, None));
+                } else if changed || self.samples.back().is_none_or(|last| due(last, t, &b)) {
                     self.samples.push_back(PlanetSample::of(t, &b, None));
                 }
             }
@@ -511,6 +532,27 @@ mod tests {
         assert_eq!(ends[0].1, Fate::Ejected);
         // declared gone once it has passed twice the spread, not long after
         assert!(ends[0].0 < 0.5, "at t = {}", ends[0].0);
+    }
+
+    #[test]
+    fn a_planet_caught_close_to_its_sun_is_scorched() {
+        let (model, y0) = lonely_star();
+        let mut sim = PlanetSim::new(6);
+        // a tight circular orbit, 0.02 from the star: about 700 K and more
+        let r: f64 = 0.018;
+        let start = Planet { p: [r, 0.0], v: [0.0, (1.0 / r).sqrt()], run: 0, story: Story::new(HZ_TEMP) };
+        sim.body = Some(start);
+        sim.samples.push_back(PlanetSample::of(0.0, &start, None));
+        let y = run(&model, y0, 0.6 * REV, &mut sim);
+        let ends: Vec<(f64, Fate)> = sim.samples.iter().filter_map(|s| Some((s.t, s.fate?))).collect();
+        assert_eq!(ends.len(), 1, "{ends:?}");
+        assert_eq!(ends[0].1, Fate::Scorched);
+        // only after it has stayed that hot for a while
+        assert!(ends[0].0 > SCORCH_TIME, "at {}", ends[0].0);
+        // and the next planet starts in the habitable zone again
+        let b = sim.body.unwrap();
+        assert_eq!(b.run, 1);
+        assert!((dist(b.p, [y[0], y[1]]) - HZ_RADIUS).abs() < 1e-2);
     }
 
     #[test]

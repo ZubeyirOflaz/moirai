@@ -169,12 +169,30 @@ pub struct FrameInput<'a> {
 }
 
 /// The planet as drawn: its recent path (oldest first; `age` runs over the trail), where it is,
-/// which planet of the scene it is (from 1) and what it has lived through.
+/// which planet of the scene it is (from 1), what it has lived through, and its temperature
+/// history over the last `history_seconds` of screen time.
 pub struct PlanetView<'a> {
     pub trail: &'a [TrailPoint],
     pub pos: [f32; 2],
     pub number: u32,
     pub chronicle: moirai_core::planet::Chronicle,
+    pub history: &'a [HistoryPoint],
+    pub history_seconds: f32,
+}
+
+/// One point of the temperature graph: `x` from 0 (oldest) to 1 (now).
+#[derive(Clone, Copy, Debug)]
+pub struct HistoryPoint {
+    pub x: f32,
+    pub temp: f32,
+    pub stable: bool,
+    pub run: u32,
+}
+
+impl HistoryPoint {
+    pub fn of(x: f32, s: &moirai_core::planet::PlanetSample) -> Self {
+        Self { x, temp: s.chronicle.temp, stable: s.chronicle.stable, run: s.run }
+    }
 }
 
 #[repr(C)]
@@ -1177,7 +1195,8 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
         if let Some(planet) = &f.planet {
-            self.hud.layout(&mut self.hud_quads.data, h, m, planet.number, &planet.chronicle, f.fade);
+            let (hud, quads) = (&self.hud, &mut self.hud_quads.data);
+            hud.layout(quads, w, m, planet.number, &planet.chronicle, planet.history, planet.history_seconds, f.fade);
             self.hud_quads.upload(gpu);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("readout"),

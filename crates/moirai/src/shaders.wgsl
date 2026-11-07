@@ -471,8 +471,8 @@ fn fs_planet(i: PlanetOut) -> @location(0) vec4<f32> {
     let w = planet_core_px() * (0.5 + 0.5 * life);
     let core = 1.0 - smoothstep(w - 0.6, w + 0.6, d);
     let gw = planet_glow_px();
-    let glow = 0.22 * exp(-(d * d) / (gw * gw));
-    return vec4<f32>(fade * (0.8 * core + glow), 0.0, 0.0, 0.0);
+    let glow = 0.12 * exp(-(d * d) / (gw * gw));
+    return vec4<f32>(fade * (0.45 * core + glow), 0.0, 0.0, 0.0);
 }
 
 // ---------------------------------------------------------------- starfield (drawn once per size)
@@ -588,6 +588,8 @@ fn fs_comp(@builtin(position) fc: vec4<f32>) -> @location(0) vec4<f32> {
         let d = length(px - to_px(g.planet.xy));
         let r = max(0.4 * g.body_core_px, 1.2);
         let hr = max(0.25 * g.body_halo_px, 2.5);
+        // a ring of night sky around it keeps it visible in front of a bright sun
+        fg = fg * (1.0 - 0.85 * (1.0 - smoothstep(r + 1.0, r + 2.5, d)));
         let core = 1.0 - smoothstep(r - 0.7, r + 0.7, d);
         fg += pc * (0.8 * exp(-(d * d) / (hr * hr))) + mix(pc, vec3<f32>(1.0), 0.6) * core * 2.0;
     }
@@ -606,10 +608,10 @@ fn fs_comp(@builtin(position) fc: vec4<f32>) -> @location(0) vec4<f32> {
 @group(1) @binding(3) var hud_smp: sampler;
 
 struct HudIn {
-    @location(0) rect: vec4<f32>,   // px: left, top, right, bottom
-    @location(1) uv: vec4<f32>,     // atlas: left, top, right, bottom
+    @location(0) rect: vec4<f32>,   // px: left, top, right, bottom (a line: its two ends)
+    @location(1) uv: vec4<f32>,     // atlas: left, top, right, bottom (a line: half its width)
     @location(2) color: vec4<f32>,  // linear RGB, straight alpha
-    @location(3) kind: u32,         // 0 glyph, 1 solid, 2 round dot
+    @location(3) kind: u32,         // 0 glyph, 1 solid, 2 round dot, 3 line
 };
 
 struct HudOut {
@@ -618,18 +620,28 @@ struct HudOut {
     @location(1) local: vec2<f32>,
     @location(2) @interpolate(flat) color: vec4<f32>,
     @location(3) @interpolate(flat) kind: u32,
+    @location(4) px: vec2<f32>,
+    @location(5) @interpolate(flat) ends: vec4<f32>,
+    @location(6) @interpolate(flat) half_width: f32,
 };
 
 @vertex
 fn vs_hud(@builtin(vertex_index) vi: u32, q: HudIn) -> HudOut {
     let c = quad_corner(vi);
     let f = 0.5 * (c + vec2<f32>(1.0));
+    var p = mix(q.rect.xy, q.rect.zw, f);
+    if (q.kind == 3u) {
+        p = capsule_corner(q.rect.xy, q.rect.zw, q.uv.x + 1.0, vi); // round caps, a pixel to fade
+    }
     var o: HudOut;
-    o.pos = to_clip(mix(q.rect.xy, q.rect.zw, f));
+    o.pos = to_clip(p);
     o.uv = mix(q.uv.xy, q.uv.zw, f);
     o.local = c;
     o.color = q.color;
     o.kind = q.kind;
+    o.px = p;
+    o.ends = q.rect;
+    o.half_width = q.uv.x;
     return o;
 }
 
@@ -640,6 +652,11 @@ fn fs_hud(i: HudOut) -> @location(0) vec4<f32> {
         a = a * textureSampleLevel(hud_atlas, hud_smp, i.uv, 0.0).r;
     } else if (i.kind == 2u) {
         a = a * (1.0 - smoothstep(0.55, 1.0, length(i.local)));
+    } else if (i.kind == 3u) {
+        let ab = i.ends.zw - i.ends.xy;
+        let t = clamp(dot(i.px - i.ends.xy, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+        let d = length(i.px - (i.ends.xy + ab * t));
+        a = a * clamp(i.half_width + 0.5 - d, 0.0, 1.0);
     }
     var rgb = i.color.rgb;
     if (g.encode_srgb > 0.5) {
