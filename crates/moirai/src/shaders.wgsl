@@ -57,8 +57,9 @@ fn quad_corner(vi: u32) -> vec2<f32> {
     return c[vi];
 }
 
-// Corner `vi` of a rectangle around segment a-b, padded by r on every side.
-fn capsule_corner(a: vec2<f32>, b: vec2<f32>, r: f32, vi: u32) -> vec2<f32> {
+// Corner `vi` of a rectangle around segment a-b: r to either side, `back` before a and `ahead`
+// past b.
+fn segment_corner(a: vec2<f32>, b: vec2<f32>, r: f32, back: f32, ahead: f32, vi: u32) -> vec2<f32> {
     var dir = b - a;
     let len = length(dir);
     if (len < 1e-4) {
@@ -68,8 +69,13 @@ fn capsule_corner(a: vec2<f32>, b: vec2<f32>, r: f32, vi: u32) -> vec2<f32> {
     }
     let nrm = vec2<f32>(-dir.y, dir.x);
     let c = quad_corner(vi);
-    let along = select(-r, len + r, c.x > 0.0);
+    let along = select(-back, len + ahead, c.x > 0.0);
     return a + dir * along + nrm * c.y * r;
+}
+
+// Corner `vi` of a rectangle around segment a-b, padded by r on every side.
+fn capsule_corner(a: vec2<f32>, b: vec2<f32>, r: f32, vi: u32) -> vec2<f32> {
+    return segment_corner(a, b, r, r, r, vi);
 }
 
 // Write intensity `v` into the channel of `body`, and `hot` into the white-hot channel.
@@ -92,6 +98,7 @@ struct Seg {
     @location(2) ages: vec2<f32>,
     @location(3) s: vec2<f32>,
     @location(4) body: u32,
+    @location(5) caps: vec2<f32>, // reach past each end as a share of the width (smoke only)
 };
 
 // ---------------------------------------------------------------- line trails
@@ -151,6 +158,9 @@ fn smoke_width(age: f32) -> f32 {
     return mix(g.smoke_w0, g.smoke_w1, pow(max(age, 0.0), 0.9));
 }
 
+// Overlap of neighbouring smoke segments past their joints, in plume half-widths.
+const SMOKE_CAP_MARGIN: f32 = 1.0;
+
 // How far the oldest smoke may have drifted sideways.
 fn smoke_drift_amp(age: f32) -> f32 {
     return g.smoke_drift * age * sqrt(age);
@@ -195,7 +205,11 @@ fn vs_smoke(@builtin(vertex_index) vi: u32, s: Seg) -> SmokeOut {
     let b = to_px(s.p1);
     let age = max(s.ages.x, s.ages.y);
     // the widest puff (2.5 local half-widths, which swell up to 1.82x) and the furthest drift
-    let p = capsule_corner(a, b, 4.6 * smoke_width(age) + smoke_drift_amp(age) + 2.0, vi);
+    let r = 4.6 * smoke_width(age) + smoke_drift_amp(age) + 2.0;
+    // past the ends only as far as this segment's share of a bend needs, plus some overlap
+    // with the neighbour (which draws the same smoke beyond that)
+    let margin = 2.0 + SMOKE_CAP_MARGIN * smoke_width(age);
+    let p = segment_corner(a, b, r, r * s.caps.x + margin, r * s.caps.y + margin, vi);
     var o: SmokeOut;
     o.pos = to_clip(p);
     o.px = p;

@@ -207,6 +207,9 @@ struct Seg {
     ages: [f32; 2],
     /// Path length at both ends (world units, relative to a whole number of noise periods).
     s: [f32; 2],
+    /// How far the smoke must reach past each end, as a share of its width: the sine of half
+    /// the turn at that joint (1 at the ends of the trail).
+    caps: [f32; 2],
     body: u32,
     _pad: u32,
 }
@@ -648,6 +651,7 @@ fn build_segments(out: &mut Vec<Seg>, f: &FrameInput, ages: &[Vec<f32>; 3], scal
         let span = SMOKE_REBASE * period;
         let base = (first.s / span).floor() * span;
         let anchor = SEG_ANCHOR * f.path_radius.max(1e-3);
+        let begin = out.len();
         let mut start = 0;
         while start + 1 < pts.len() {
             let end = segment_end(pts, start, scale, MAX_SEG_PX, MAX_SAG_PX, anchor);
@@ -659,12 +663,38 @@ fn build_segments(out: &mut Vec<Seg>, f: &FrameInput, ages: &[Vec<f32>; 3], scal
                     p1: c.p,
                     ages: [age[start], age[end]],
                     s: [(a.s - base) as f32, (c.s - base) as f32],
+                    caps: [1.0; 2],
                     body: b as u32,
                     _pad: 0,
                 });
             }
             start = end;
         }
+        set_caps(&mut out[begin..]);
+    }
+}
+
+/// How far each segment's smoke has to reach past its ends. On the outside of a bend there is
+/// a wedge that neither segment covers between its ends; each fills its half, which takes the
+/// sine of half the turn times the smoke's width. Anywhere else the neighbouring segment draws
+/// the same smoke, so reaching further would only redo it. The ends of the trail stay round.
+fn set_caps(segs: &mut [Seg]) {
+    let dirs: Vec<[f32; 2]> = segs
+        .iter()
+        .map(|s| {
+            let (dx, dy) = (s.p1[0] - s.p0[0], s.p1[1] - s.p0[1]);
+            let l = dx.hypot(dy).max(1e-12);
+            [dx / l, dy / l]
+        })
+        .collect();
+    // sin(turn / 2) = sqrt((1 - cos(turn)) / 2)
+    let half_turn = |a: [f32; 2], b: [f32; 2]| ((1.0 - (a[0] * b[0] + a[1] * b[1]).clamp(-1.0, 1.0)) * 0.5).sqrt();
+    for (k, seg) in segs.iter_mut().enumerate() {
+        let d = dirs[k];
+        seg.caps = [
+            if k > 0 { half_turn(dirs[k - 1], d) } else { 1.0 },
+            dirs.get(k + 1).map_or(1.0, |&next| half_turn(d, next)),
+        ];
     }
 }
 
@@ -747,7 +777,10 @@ impl Renderer {
         let globals_layout = layout("globals layout", &[Some(&globals_bgl)]);
         let smoke_layout = layout("smoke layout", &[Some(&globals_bgl), Some(&noise_bgl)]);
         let comp_layout = layout("composite layout", &[Some(&comp_bgl)]);
-        let seg_attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2, 4 => Uint32];
+        // in the order of the fields of `Seg` (the macro lays them out one after another)
+        let seg_attrs = wgpu::vertex_attr_array![
+            0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2, 5 => Float32x2, 4 => Uint32
+        ];
         let line_pipeline = instanced_pipeline(
             dev,
             &module,
