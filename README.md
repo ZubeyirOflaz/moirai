@@ -87,16 +87,23 @@ its file is reused, so frames never tear and moirai never runs ahead of the term
 that refuse files get a fresh shared-memory object per frame (`t=s`) or, as a last resort,
 base64 data at 10 fps.
 
-Ghostty additionally reads each frame and uploads it to its own GPU texture. To save battery,
-lower `--fps` (the motion is slow; 20–24 fps looks fine) or `--scale 0.75`. moirai cannot tell
-when its tab is hidden, so quit it (`q`) when you will not look at it for a while.
+Ghostty then has more work per frame than moirai itself: it reads the frame, copies it, uploads
+it into a new GPU texture and redraws its window. In a quarter-screen pane (1391×858) at 30 fps
+that came to about 19% of one core, against moirai's 6–7%, plus a few percent in GNOME Shell for
+compositing. About 8% of Ghostty's share is just redrawing the window 30 times a second, which
+any animation in a terminal costs. Frames go out as RGB rather than RGBA, which saves Ghostty
+about a tenth. The rest scales with the frame rate and, less, with the pixel count: `--fps 20`
+cuts Ghostty's share by about a fifth, `--fps 15` by over a third and `--scale 0.5` by about a
+quarter (`--scale 0.75` hardly helps). The stars cross such a pane in a few seconds, about 10 px
+per frame at 30 fps, so lower frame rates show as visible stepping. moirai cannot tell when its
+tab is hidden, so quit it (`q`) when you will not look at it for a while.
 
 ### Cost
 
 Approximate frame times, measured on a Ryzen AI laptop (Radeon 860M) running on battery, with
 `--dry-run` on Moth I (one of the busiest scenes) once its trails were fully grown. They cover
-render, physics and, for the pane, the copy into the frame file; Ghostty's own work is not
-included.
+render, physics and, for the pane, the copy into the frame file; Ghostty's own work (see above)
+is not included.
 
 | output | trails | frame time | CPU (one core) |
 |---|---|---|---|

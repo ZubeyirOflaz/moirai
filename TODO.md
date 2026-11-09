@@ -18,6 +18,21 @@ frame (smoke currently costs about 2.9 ms more than lines there).
       stardust automatically when unplugged (`/sys/class/power_supply`).
 - [ ] Re-run the battery power benchmark for smoke and stardust (unplugged, machine idle).
 
+## Performance (Ghostty pane)
+
+Ghostty's own cost is mostly per frame: in a quarter-screen pane at 30 fps about 8% of a core
+to redraw its window and about 11% to take in each frame (read, copy, new GPU texture), against
+moirai's 6–7%. Measured with a separate `ghostty --gtk-single-instance=false -e moirai --term`
+window and `/proc/<pid>/stat`. Ruled out: synchronized output (Ghostty already draws once per
+frame), one image id replaced in place (no gain), animation-frame edits (Ghostty 1.4 composes
+them on the CPU and still re-uploads the whole texture: costlier), dirty tiles (the twinkling
+starfield changes every tile every frame).
+
+- [ ] Try 20 fps with motion blur: draw star cores, the planet and the newest bit of each trail
+      smeared over the frame interval, so that 20 fps steps (about 16 px in a quarter-screen
+      pane) read as motion. Would cut Ghostty's and GNOME Shell's share by about a third; only
+      worth keeping if it looks as smooth as plain 30 fps.
+
 ## Planet
 
 - [ ] Step 3, only if runs feel too short: launch selection by look-ahead (try a few dozen

@@ -1379,11 +1379,54 @@ impl Offscreen {
         }
         self.buffer.unmap();
     }
+
+    /// Like `read`, but drop alpha: tightly packed RGB rows (len = w * h * 3). The terminal
+    /// then has a quarter fewer bytes to take in per frame.
+    pub fn read_rgb(&self, gpu: &Gpu, out: &mut [u8]) {
+        let slice = self.buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        {
+            let data = slice.get_mapped_range().expect("readback buffer is mapped");
+            let w = self.width as usize;
+            for (y, dst) in out.chunks_exact_mut(w * 3).take(self.height as usize).enumerate() {
+                rgba_to_rgb(&data[y * self.padded_row as usize..][..w * 4], dst);
+            }
+        }
+        self.buffer.unmap();
+    }
+}
+
+/// Drop the alpha channel, four pixels (16 bytes in, 12 out) at a time.
+fn rgba_to_rgb(src: &[u8], dst: &mut [u8]) {
+    let (src4, src_rest) = src.as_chunks::<16>();
+    let (dst4, dst_rest) = dst.as_chunks_mut::<12>();
+    for (s, d) in src4.iter().zip(dst4) {
+        let px = |i: usize| u32::from_le_bytes([s[i], s[i + 1], s[i + 2], s[i + 3]]);
+        let (p0, p1, p2, p3) = (px(0), px(4), px(8), px(12));
+        d[0..4].copy_from_slice(&((p0 & 0xff_ffff) | (p1 << 24)).to_le_bytes());
+        d[4..8].copy_from_slice(&(((p1 >> 8) & 0xffff) | (p2 << 16)).to_le_bytes());
+        d[8..12].copy_from_slice(&(((p2 >> 16) & 0xff) | (p3 << 8)).to_le_bytes());
+    }
+    for (s, d) in src_rest.as_chunks::<4>().0.iter().zip(dst_rest.as_chunks_mut::<3>().0) {
+        d.copy_from_slice(&s[..3]);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alpha_is_dropped_in_place_order() {
+        for n in [1, 3, 4, 5, 9] {
+            let src: Vec<u8> = (0..n * 4).map(|i| i as u8).collect();
+            let want: Vec<u8> = src.chunks(4).flat_map(|p| p[..3].to_vec()).collect();
+            let mut got = vec![0u8; n * 3];
+            rgba_to_rgb(&src, &mut got);
+            assert_eq!(got, want, "{n} pixels");
+        }
+    }
 
     #[test]
     fn noise_volume_tiles_and_is_normalised() {

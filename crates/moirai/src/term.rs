@@ -1,13 +1,14 @@
 //! Run inside a terminal pane using the kitty graphics protocol (Ghostty, kitty, WezTerm).
 //!
-//! Frames are rendered on the GPU and read back into memory the terminal reads directly, so
-//! only a ~100 byte command per frame flows through the pty. Preferred transport: two files in
-//! a tmpfs (`t=f`), created and mapped once and overwritten in turn. The terminal reads a file
-//! and answers OK, and only then is that file written again, so there is no tearing, natural
-//! backpressure, and no per-frame allocation. Terminals that refuse files get a fresh POSIX
-//! shared-memory object per frame (`t=s`, unlinked by the terminal after reading; creating and
-//! zeroing it costs about three times the copy itself). The last resort is base64 through the
-//! pty at a low frame rate.
+//! Frames are rendered on the GPU and read back into memory the terminal reads directly, so only a
+//! ~100 byte command per frame flows through the pty. They go out as RGB: the picture is opaque,
+//! and a quarter fewer bytes per frame cut Ghostty's own work by about a tenth. Preferred
+//! transport: two files in a tmpfs (`t=f`), created and mapped once and overwritten in turn. The
+//! terminal reads a file and answers OK, and only then is that file written again, so there is no
+//! tearing, natural backpressure, and no per-frame allocation. Terminals that refuse files get a
+//! fresh POSIX shared-memory object per frame (`t=s`, unlinked by the terminal after reading;
+//! creating and zeroing it costs about three times the copy itself). The last resort is base64
+//! through the pty at a low frame rate.
 
 use std::ffi::CString;
 use std::io::{self, Write};
@@ -31,6 +32,9 @@ extern "C" fn on_quit(_: libc::c_int) {
 
 const ENTER: &str = "\x1b[?1049h\x1b[?25l\x1b[2J";
 const LEAVE: &str = "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[?25h\x1b[?1049l";
+
+/// Bytes per pixel of the frames sent (RGB, `f=24`).
+const BPP: u32 = 3;
 
 /// A frame still unacknowledged after this long is assumed lost (its file is reused).
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -457,14 +461,14 @@ impl Transport {
         match self {
             Self::Files { files, .. } => {
                 let f = files.get_mut(slot).ok_or("frame files are not set up")?;
-                off.read(gpu, f.bytes());
+                off.read_rgb(gpu, f.bytes());
                 f.pending = Some(Instant::now());
                 Ok(format!("\x1b_G{head},t=f,S={};{}\x1b\\", f.len, b64(f.path.as_bytes())))
             }
             Self::Shm { sent } => {
                 let name = format!("/moirai-{}-{counter}", std::process::id());
-                let len = (off.width * off.height * 4) as usize;
-                write_shm(&name, len, |dst| off.read(gpu, dst)).map_err(|e| format!("shared memory: {e}"))?;
+                let len = (off.width * off.height * BPP) as usize;
+                write_shm(&name, len, |dst| off.read_rgb(gpu, dst)).map_err(|e| format!("shared memory: {e}"))?;
                 sent.push(name.clone());
                 if sent.len() > 4 {
                     sent.remove(0);
@@ -472,7 +476,7 @@ impl Transport {
                 Ok(format!("\x1b_G{head},q=2,t=s;{}\x1b\\", b64(name.as_bytes())))
             }
             Self::Direct { pixels } => {
-                off.read(gpu, pixels);
+                off.read_rgb(gpu, pixels);
                 let data = b64(pixels);
                 let mut cmd = String::with_capacity(data.len() + data.len() / 4096 * 16 + 128);
                 let chunks: Vec<&[u8]> = data.as_bytes().chunks(4096).collect();
@@ -513,7 +517,7 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
     let mut geo = geometry(opts.scale).map_err(io_err)?;
     let mut renderer = Renderer::new(gpu, OFFSCREEN_FORMAT, geo.width, geo.height);
     let mut off = Offscreen::new(gpu, geo.width, geo.height);
-    transport.resize((geo.width * geo.height * 4) as usize)?;
+    transport.resize((geo.width * geo.height * BPP) as usize)?;
 
     let mut engine = Engine::start(cfg);
     let mut counter: u64 = 0;
@@ -544,7 +548,7 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
                 Event::Reply { id, ok } => {
                     if let Some(fallback) = transport.reply(id, ok) {
                         transport = fallback;
-                        transport.resize((geo.width * geo.height * 4) as usize)?;
+                        transport.resize((geo.width * geo.height * BPP) as usize)?;
                     }
                 }
             }
@@ -554,7 +558,7 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
         }
         if let Some(fallback) = transport.check_silence(first_sent) {
             transport = fallback;
-            transport.resize((geo.width * geo.height * 4) as usize)?;
+            transport.resize((geo.width * geo.height * BPP) as usize)?;
         }
         let now = Instant::now();
         if now < next_frame {
@@ -567,7 +571,7 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
             geo = geometry(opts.scale).map_err(io_err)?;
             renderer.resize(gpu, geo.width, geo.height);
             off = Offscreen::new(gpu, geo.width, geo.height);
-            transport.resize((geo.width * geo.height * 4) as usize)?;
+            transport.resize((geo.width * geo.height * BPP) as usize)?;
             out.write_all(b"\x1b_Ga=d,d=A,q=2\x1b\\\x1b[2J").map_err(io_err)?;
         }
         engine.update((now - last).as_secs_f64(), look);
@@ -585,7 +589,7 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
         gpu.queue.submit([enc.finish()]);
         counter += 1;
         let (id, old) = (slot + 1, 2 - slot);
-        let head = format!("a=T,f=32,s={},v={},c={},r={},i={id},p=1,C=1", geo.width, geo.height, geo.cols, geo.rows);
+        let head = format!("a=T,f=24,s={},v={},c={},r={},i={id},p=1,C=1", geo.width, geo.height, geo.cols, geo.rows);
         let mut cmd = String::from("\x1b[H");
         cmd += &transport.send(gpu, &off, &head, slot, counter)?;
         cmd += &format!("\x1b_Ga=d,d=I,i={old},q=2\x1b\\");
@@ -610,7 +614,7 @@ pub fn dry_run(
     let mut renderer = Renderer::new(gpu, OFFSCREEN_FORMAT, w, h);
     let off = Offscreen::new(gpu, w, h);
     let mut files = if readback {
-        Some(frame_files(&frame_dir(), (w * h * 4) as usize).map_err(|e| format!("frame files: {e}"))?)
+        Some(frame_files(&frame_dir(), (w * h * BPP) as usize).map_err(|e| format!("frame files: {e}"))?)
     } else {
         None
     };
@@ -633,7 +637,7 @@ pub fn dry_run(
         }
         gpu.queue.submit([enc.finish()]);
         match files.as_mut() {
-            Some(files) => off.read(gpu, files[(frames % 2) as usize].bytes()),
+            Some(files) => off.read_rgb(gpu, files[(frames % 2) as usize].bytes()),
             None => {
                 let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
             }
