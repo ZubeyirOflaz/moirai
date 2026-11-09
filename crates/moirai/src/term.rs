@@ -527,6 +527,8 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
     let mut parser = InputParser::default();
     let mut events = Vec::new();
     let mut input = [0u8; 4096];
+    // the frame on screen is a still one (see `Engine::still`): until that ends it can stay
+    let mut shown_still = false;
 
     while !QUIT.load(Ordering::Relaxed) {
         // sleep until the next frame is due, waking early for keys and replies
@@ -537,6 +539,9 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
         parser.feed(if n > 0 { &input[..n as usize] } else { &[] }, &mut events);
         let mut quit = false;
         for ev in events.drain(..) {
+            if !matches!(ev, Event::Reply { .. }) {
+                shown_still = false;
+            }
             match ev {
                 Event::Escape | Event::Key(b'q' | b'Q' | 3) => quit = true,
                 Event::Key(b'n') => engine.skip(),
@@ -573,9 +578,15 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
             off = Offscreen::new(gpu, geo.width, geo.height);
             transport.resize((geo.width * geo.height * BPP) as usize)?;
             out.write_all(b"\x1b_Ga=d,d=A,q=2\x1b\\\x1b[2J").map_err(io_err)?;
+            shown_still = false;
         }
         engine.update((now - last).as_secs_f64(), look);
         last = now;
+        // nothing on screen changes while the story is held: the frame shown stays, which spares
+        // the terminal its work too
+        if shown_still && engine.still() {
+            continue;
+        }
 
         // ids 1 and 2 alternate: show the new image, then delete the previous one
         let slot = ((counter + 1) % 2) as usize;
@@ -596,6 +607,7 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
         out.write_all(cmd.as_bytes()).map_err(io_err)?;
         out.flush().map_err(io_err)?;
         first_sent.get_or_insert(now);
+        shown_still = engine.still();
     }
     Ok(())
 }

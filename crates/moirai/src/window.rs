@@ -34,6 +34,8 @@ struct App {
     engine: Option<Engine>,
     last: Instant,
     next_frame: Instant,
+    /// The frame on screen is a still one (see `Engine::still`): until that ends it can stay.
+    shown_still: bool,
     error: Option<String>,
 }
 
@@ -94,6 +96,7 @@ impl App {
         gfx.gpu.queue.submit([enc.finish()]);
         gfx.window.pre_present_notify();
         gfx.gpu.queue.present(frame);
+        self.shown_still = engine.still();
     }
 }
 
@@ -110,6 +113,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::KeyboardInput { event: KeyEvent { logical_key, state: ElementState::Pressed, .. }, .. } => {
+                self.shown_still = false;
                 match logical_key.as_ref() {
                     Key::Named(NamedKey::Escape) | Key::Character("q") => el.exit(),
                     Key::Character("n") => {
@@ -133,6 +137,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(size) => {
+                self.shown_still = false;
                 if let Some(g) = self.gfx.as_mut() {
                     g.config.width = size.width.max(1);
                     g.config.height = size.height.max(1);
@@ -148,7 +153,13 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         let now = Instant::now();
         if now >= self.next_frame {
-            if let Some(g) = self.gfx.as_ref() {
+            if self.shown_still && self.engine.as_ref().is_some_and(Engine::still) {
+                // nothing on screen changes while the story is held: only keep the clock going
+                if let Some(e) = self.engine.as_mut() {
+                    e.update((now - self.last).as_secs_f64().min(0.25), self.opts.look);
+                }
+                self.last = now;
+            } else if let Some(g) = self.gfx.as_ref() {
                 g.window.request_redraw();
             }
             let dt = Duration::from_secs_f64(1.0 / self.opts.fps);
@@ -160,7 +171,16 @@ impl ApplicationHandler for App {
 
 pub fn run(cfg: EngineConfig, opts: WindowOptions) -> Result<(), String> {
     let el = EventLoop::new().map_err(|e| e.to_string())?;
-    let mut app = App { cfg, opts, gfx: None, engine: None, last: Instant::now(), next_frame: Instant::now(), error: None };
+    let mut app = App {
+        cfg,
+        opts,
+        gfx: None,
+        engine: None,
+        last: Instant::now(),
+        next_frame: Instant::now(),
+        shown_still: false,
+        error: None,
+    };
     el.run_app(&mut app).map_err(|e| e.to_string())?;
     match app.error {
         Some(e) => Err(e),

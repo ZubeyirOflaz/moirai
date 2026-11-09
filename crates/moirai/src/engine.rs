@@ -9,11 +9,12 @@ use std::thread;
 use std::time::Duration;
 
 use moirai_core::REV;
+use moirai_core::annals::{self, Annals};
 use moirai_core::planet::{PlanetSample, planet_at};
 use moirai_core::scene::{Director, DirectorConfig, Scene};
 use moirai_core::timeline::{Sample, interpolate};
 
-use crate::render::{FrameInput, HistoryPoint, Look, PALETTES, Palette, PlanetView, TrailPoint};
+use crate::render::{FrameInput, HistoryPoint, Look, PALETTES, Palette, PlanetView, StoryView, TrailPoint};
 
 struct AtomicF64(AtomicU64);
 
@@ -123,6 +124,31 @@ pub struct Paths {
 /// With the planet shown the scene runs at this share of its normal speed: otherwise the planet
 /// circles its sun several times a second and its orbit is hard to follow.
 pub const PLANET_PACE: f64 = 0.5;
+
+/// The story told when a scene with the planet shown ends: how long it stays (seconds), how long
+/// it takes to fade in and out and to draw its timeline, and how much the starfield dims behind it.
+pub const STORY_SECONDS: f64 = 30.0;
+const STORY_FADE: f64 = 1.5;
+const STORY_DRAW: f64 = 4.0;
+const STORY_DIM: f32 = 0.5;
+
+/// Where the end-of-scene story stands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Story {
+    /// The scene is still running.
+    Ahead,
+    /// Being told, for so many seconds.
+    Telling(f64),
+    /// Told, or not to be told: on to the next scene.
+    Told,
+}
+
+/// How the story looks `s` seconds in: its opacity, and how much of its timeline is drawn.
+pub fn story_progress(s: f64) -> (f32, f32) {
+    let alpha = smoothstep(0.0, STORY_FADE, s) * smoothstep(0.0, STORY_FADE, STORY_SECONDS - s);
+    let x = (s / STORY_DRAW).clamp(0.0, 1.0);
+    (alpha as f32, (1.0 - (1.0 - x).powi(3)) as f32)
+}
 
 /// The planet's temperature over the `HISTORY` before `t`, into `out` (oldest first), ending
 /// with `now`: from every slice of `HISTORY / HISTORY_SLICES` its coldest and hottest moment, in
@@ -261,6 +287,11 @@ pub struct Engine {
     palette_shift: usize,
     paths: Paths,
     bodies: [[f32; 2]; 3],
+    /// This scene's planets as shown so far, for the story at its end.
+    annals: Annals,
+    story: Story,
+    /// The scene was cut short with `skip`: no story then.
+    skipped: bool,
 }
 
 fn smoothstep(e0: f64, e1: f64, x: f64) -> f64 {
@@ -295,6 +326,9 @@ impl Engine {
             palette_shift: 0,
             paths: Paths::default(),
             bodies: [[0.0; 2]; 3],
+            annals: Annals::default(),
+            story: Story::Ahead,
+            skipped: false,
         }
     }
 
@@ -316,8 +350,13 @@ impl Engine {
         REV / self.cfg.seconds_per_rev * self.pace
     }
 
-    /// Fade out and move on to the next scene.
+    /// Fade out and move on to the next scene (while the story is told: end it).
     pub fn skip(&mut self) {
+        if let Story::Telling(s) = &mut self.story {
+            *s = s.max(STORY_SECONDS - STORY_FADE);
+            return;
+        }
+        self.skipped = true;
         let fade = self.cfg.fade_seconds * self.speed();
         let end = self.current.end.load();
         if self.clock < end - fade {
@@ -327,7 +366,10 @@ impl Engine {
 
     /// Advance the clock by `dt` seconds of wall time, at the pace `look` calls for.
     pub fn update(&mut self, dt: f64, look: Look) {
-        self.elapsed += dt;
+        // the sky holds still while the story is told, so its frames need not be redrawn
+        if !matches!(self.story, Story::Telling(_)) {
+            self.elapsed += dt;
+        }
         let pace = if look.planet { PLANET_PACE } else { 1.0 };
         self.pace += (pace - self.pace) * (1.0 - (-dt / 0.4).exp()); // eased over about a second
         if !self.paused {
@@ -337,19 +379,82 @@ impl Engine {
             let mut t = (self.clock + dt * self.speed()).min(frontier).max(self.clock);
             if t >= end {
                 t = end;
-                if let Ok(next) = self.rx.try_recv() {
+                // the scene is over: with the planet shown, tell its story before moving on
+                self.story = match self.story {
+                    Story::Ahead if look.planet && !self.skipped => Story::Telling(0.0),
+                    Story::Telling(s) if look.planet && s + dt < STORY_SECONDS => Story::Telling(s + dt),
+                    _ => Story::Told,
+                };
+                if self.story == Story::Told
+                    && let Ok(next) = self.rx.try_recv()
+                {
                     self.current = next;
                     self.palette_shift = 0;
                     t = 0.0;
                     self.radius = self.current.frame_radius.unwrap_or(self.radius);
+                    self.annals = Annals::default();
+                    self.story = Story::Ahead;
+                    self.skipped = false;
                 }
             }
             self.clock = t;
             self.current.display.store(t);
+            self.gather();
         }
         // critically damped-ish camera zoom (only for free dances)
         let k = 1.0 - (-dt / 2.5).exp();
         self.radius += (self.radius_target - self.radius) * k;
+    }
+
+    /// Take the planet's samples up to the clock into the annals, and close them once the scene
+    /// is over.
+    fn gather(&mut self) {
+        let cur = self.current.clone();
+        let samples = cur.planet.lock().expect("planet lock");
+        let start = samples.partition_point(|s| !self.annals.is_new(s));
+        for s in samples.iter().skip(start).take_while(|s| s.t <= self.clock) {
+            self.annals.record(s);
+        }
+        if self.story != Story::Ahead {
+            self.annals.finish(cur.end.load());
+        }
+    }
+
+    /// Whether frames are not changing at all just now (the story is drawn and held), so that
+    /// the last one shown can stay.
+    pub fn still(&self) -> bool {
+        matches!(self.story, Story::Telling(s) if (STORY_DRAW..STORY_SECONDS - STORY_FADE).contains(&s))
+    }
+
+    /// The story frame, `s` seconds into the telling: the scene has faded out, the sky dims.
+    fn story_frame(&mut self, s: f64, look: Look) -> FrameInput<'_> {
+        for v in &mut self.paths.trails {
+            v.clear();
+        }
+        let (alpha, drawn) = story_progress(s);
+        let year = annals::year();
+        let paths = &self.paths;
+        FrameInput {
+            trails: [&paths.trails[0], &paths.trails[1], &paths.trails[2]],
+            bodies: self.bodies,
+            center: [0.0, 0.0],
+            radius: self.radius as f32,
+            palette: self.palette(),
+            fade: 0.0,
+            time: self.elapsed as f32,
+            look: Look { stars: look.stars * (1.0 - STORY_DIM * alpha), ..look },
+            path_radius: self.current.frame_radius.unwrap_or(DANCE_RADIUS),
+            salt: dust_salt(self.current.palette),
+            planet: None,
+            story: Some(StoryView {
+                annals: &self.annals,
+                title: &self.current.title,
+                years: (self.current.end.load() / year) as f32,
+                seconds_per_year: (year / self.speed()) as f32,
+                alpha,
+                drawn,
+            }),
+        }
     }
 
     fn fade(&self) -> f64 {
@@ -360,6 +465,9 @@ impl Engine {
 
     /// Build the frame for the current clock.
     pub fn frame(&mut self, look: Look) -> FrameInput<'_> {
+        if let Story::Telling(s) = self.story {
+            return self.story_frame(s, look);
+        }
         let cur = self.current.clone();
         let t = self.clock;
         let trail = cur.trail;
@@ -428,6 +536,7 @@ impl Engine {
                 history: &paths.history,
                 history_seconds,
             }),
+            story: None,
         }
     }
 }
@@ -448,39 +557,29 @@ impl Drop for Engine {
     }
 }
 
-/// For each planet of a scene: how long it lasted (revolutions), how it ended (`None`: still
-/// there when the scene ended) and what it had lived through by then.
-pub type PlanetRuns = Vec<(f64, Option<moirai_core::planet::Fate>, moirai_core::planet::Chronicle)>;
+/// Compute `scene` to its end, as the physics thread would, and return when it ends: earlier
+/// than planned if steering gives up on an event (the scene then ends a revolution before it).
+fn complete(scene: &mut Scene) -> f64 {
+    let (mut end, mut display) = (scene.duration, 0.0);
+    while display < end {
+        display = (display + REV).min(end);
+        if let Some(tf) = scene.timeline.fill(display, display + scene.lookahead, false) {
+            end = end.min((tf - REV).max(display + 0.5 * REV));
+        }
+    }
+    end
+}
 
 /// Simulate `count` scenes (the first as requested, then as the director picks them) and return
-/// each one's title and planet runs.
-pub fn planet_runs(seed: u64, director: DirectorConfig, first: SceneRequest, count: usize) -> Vec<(String, PlanetRuns)> {
+/// each one's title, length (time units) and the story of its planets.
+pub fn scene_annals(seed: u64, director: DirectorConfig, first: SceneRequest, count: usize) -> Vec<(String, f64, Annals)> {
     let mut d = Director::new(seed, director);
     (0..count)
         .map(|i| {
             let mut scene = make_scene(&mut d, if i == 0 { first } else { SceneRequest::Random });
-            let mut display = 0.0;
-            while display < scene.duration {
-                display += REV;
-                scene.timeline.fill(display, display + scene.lookahead, false);
-            }
-            let mut runs = Vec::new();
-            if let Some(planet) = scene.timeline.planet() {
-                let mut start: Option<f64> = None;
-                let mut last = None;
-                for s in planet.samples.iter().take_while(|s| s.t <= scene.duration) {
-                    let begun = *start.get_or_insert(s.t);
-                    last = Some(s.chronicle);
-                    if s.fate.is_some() {
-                        runs.push(((s.t - begun) / REV, s.fate, s.chronicle));
-                        start = None;
-                    }
-                }
-                if let (Some(begun), Some(c)) = (start, last) {
-                    runs.push(((scene.duration - begun) / REV, None, c));
-                }
-            }
-            (scene.title, runs)
+            let end = complete(&mut scene);
+            let annals = scene.timeline.planet().map(|p| Annals::of(&p.samples, end)).unwrap_or_default();
+            (scene.title, end, annals)
         })
         .collect()
 }
@@ -563,5 +662,45 @@ pub fn still_frame<'a>(
             history: &paths.history,
             history_seconds,
         }),
+        story: None,
     }
+}
+
+/// A scene computed to its end, with the story of its planets (for snapshots of the story).
+pub fn story_scene(req: SceneRequest, seed: u64, director: DirectorConfig) -> (Scene, f64, Annals) {
+    let mut d = Director::new(seed, director);
+    let mut scene = make_scene(&mut d, req);
+    let end = complete(&mut scene);
+    let annals = scene.timeline.planet().map(|p| Annals::of(&p.samples, end)).unwrap_or_default();
+    (scene, end, annals)
+}
+
+/// The story frame of a scene computed to its `end` (snapshots), `s` seconds into the telling;
+/// `seconds_per_rev` as in `still_frame`.
+#[allow(clippy::too_many_arguments)]
+pub fn story_still<'a>(
+    scene: &'a Scene,
+    end: f64,
+    annals: &'a Annals,
+    paths: &'a mut Paths,
+    look: Look,
+    palettes: u32,
+    seconds_per_rev: f64,
+    s: f64,
+) -> FrameInput<'a> {
+    let mut f = still_frame(scene, end, paths, Look { planet: false, ..look }, palettes, 0.0, seconds_per_rev);
+    let (alpha, drawn) = story_progress(s);
+    let year = annals::year();
+    f.trails = [&[], &[], &[]];
+    f.fade = 0.0;
+    f.look.stars *= 1.0 - STORY_DIM * alpha;
+    f.story = Some(StoryView {
+        annals,
+        title: &scene.title,
+        years: (end / year) as f32,
+        seconds_per_year: (year / REV * seconds_per_rev) as f32,
+        alpha,
+        drawn,
+    });
+    f
 }

@@ -16,6 +16,7 @@
 //! bodies, then tone maps.
 
 use bytemuck::{Pod, Zeroable};
+use moirai_core::annals::Annals;
 use moirai_core::rng::Rng;
 
 use crate::hud::{Hud, HudQuad, temperature_color};
@@ -166,6 +167,20 @@ pub struct FrameInput<'a> {
     pub salt: u32,
     /// The planet, when it is shown.
     pub planet: Option<PlanetView<'a>>,
+    /// The story told at the end of a scene, while it is told (instead of the planet's readout).
+    pub story: Option<StoryView<'a>>,
+}
+
+/// The story of a scene's planets, told at its end: what happened (see `Annals`), the scene's
+/// title, how many years it lasted and how long a year took on screen; faded by `alpha`, with its
+/// timeline drawn over the first `drawn` share of the scene.
+pub struct StoryView<'a> {
+    pub annals: &'a Annals,
+    pub title: &'a str,
+    pub years: f32,
+    pub seconds_per_year: f32,
+    pub alpha: f32,
+    pub drawn: f32,
 }
 
 /// The planet as drawn: its recent path (oldest first; `age` runs over the trail), where it is,
@@ -1194,9 +1209,14 @@ impl Renderer {
             pass.set_bind_group(0, &self.targets.comp_bg, &[]);
             pass.draw(0..3, 0..1);
         }
-        if let Some(planet) = &f.planet {
-            let (hud, quads) = (&self.hud, &mut self.hud_quads.data);
+        let (hud, quads) = (&self.hud, &mut self.hud_quads.data);
+        quads.clear();
+        if let Some(story) = &f.story {
+            hud.story(quads, w, h, story);
+        } else if let Some(planet) = &f.planet {
             hud.layout(quads, w, m, planet.number, &planet.chronicle, planet.history, planet.history_seconds, f.fade);
+        }
+        if !self.hud_quads.data.is_empty() {
             self.hud_quads.upload(gpu);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("readout"),

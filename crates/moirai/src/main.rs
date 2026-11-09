@@ -8,10 +8,14 @@ mod window;
 
 use std::process::ExitCode;
 
-use engine::{EngineConfig, PLANET_PACE, Paths, SceneRequest, planet_runs, snapshot_scene, still_frame};
+use engine::{
+    EngineConfig, PLANET_PACE, Paths, STORY_SECONDS, SceneRequest, scene_annals, snapshot_scene, still_frame, story_scene,
+    story_still,
+};
+use moirai_core::annals::{Durations, Span};
 use moirai_core::library::catalog;
 use moirai_core::scene::DirectorConfig;
-use render::{Gpu, Look, OFFSCREEN_FORMAT, Offscreen, PALETTES, Renderer, TrailStyle, instance, palette_index};
+use render::{FrameInput, Gpu, Look, OFFSCREEN_FORMAT, Offscreen, PALETTES, Renderer, TrailStyle, instance, palette_index};
 
 const HELP: &str = "\
 moirai - three bodies, dancing forever
@@ -41,7 +45,8 @@ OPTIONS
   --stars F            starfield brightness (default 1; 0 or --no-stars: plain background)
   --planet             show the planet: a massless world in the habitable zone of one sun,
                        replaced by a new one when it hits a star or leaves the system (the
-                       scene runs at half speed while it is shown)
+                       scene runs at half speed while it is shown); when a scene ends, the
+                       story of its worlds is told for 30 s
   --planet-stats N     simulate N scenes without showing anything and report how long their
                        planets lasted
   --fps N              frame rate (default 60 in a window, 20 in a terminal)
@@ -50,6 +55,8 @@ OPTIONS
   --size WxH           snapshot size (default 1280x800)
   --at R               snapshot time in revolutions (default 6)
   --frames N           with --snapshot: N consecutive frames at --fps (FILE-000.png, ...)
+  --story              with --snapshot: the story told when the scene ends (with --frames: as it
+                       appears, from its first second)
   --dry-run SECONDS    measure the frame cost at --size without showing anything (with
                        --term: including the copy into the frame the terminal reads)
 ";
@@ -73,6 +80,8 @@ struct Args {
     at: f64,
     frames: u32,
     dry_run: Option<f64>,
+    /// With `--snapshot`: the story told at the end of the scene.
+    story: bool,
 }
 
 enum Mode {
@@ -101,6 +110,7 @@ fn parse() -> Result<Args, String> {
         at: 6.0,
         frames: 1,
         dry_run: None,
+        story: false,
     };
     let mut it = std::env::args().skip(1);
     let num = |v: Option<String>, k: &str| -> Result<f64, String> {
@@ -132,6 +142,7 @@ fn parse() -> Result<Args, String> {
             "--scale" => a.scale = num(it.next(), &k)?.clamp(0.25, 2.0) as f32,
             "--no-stars" => a.look.stars = 0.0,
             "--planet" => a.look.planet = true,
+            "--story" => (a.story, a.look.planet) = (true, true),
             "--planet-stats" => a.mode = Mode::PlanetStats(num(it.next(), &k)?.clamp(1.0, 10_000.0) as usize),
             "--stars" => a.look.stars = num(it.next(), &k)?.clamp(0.0, 10.0) as f32,
             "--trails" => {
@@ -171,36 +182,55 @@ fn snapshot(a: &Args, path: &str) -> Result<(), String> {
     let fps = a.fps.unwrap_or(30.0);
     // with the planet shown the scene runs slower, as it does live
     let seconds_per_rev = a.seconds_per_rev / if a.look.planet { PLANET_PACE } else { 1.0 };
-    let revs_per_frame = 1.0 / (fps * seconds_per_rev);
-    let last = a.at + (a.frames - 1) as f64 * revs_per_frame;
-    let (scene, _) = snapshot_scene(a.scene, a.seed, last);
     let mut renderer = Renderer::new(&gpu, OFFSCREEN_FORMAT, w, h);
     let off = Offscreen::new(&gpu, w, h);
     let mut paths = Paths::default();
     let mut px = vec![0u8; (w * h * 4) as usize];
-    for i in 0..a.frames {
-        let revs = a.at + i as f64 * revs_per_frame;
-        let time = (revs * seconds_per_rev) as f32;
-        let input = still_frame(&scene, revs * moirai_core::REV, &mut paths, a.look, a.palettes, time, seconds_per_rev);
-        let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("snapshot") });
-        renderer.render(&gpu, &mut enc, &off.view, &input);
-        off.copy_out(&mut enc);
-        gpu.queue.submit([enc.finish()]);
-        off.read(&gpu, &mut px);
-        let file_name = if a.frames == 1 {
+    let file_name = |i: u32| {
+        if a.frames == 1 {
             path.to_string()
         } else {
             let (stem, ext) = path.rsplit_once('.').unwrap_or((path, "png"));
             format!("{stem}-{i:03}.{ext}")
-        };
-        let file = std::fs::File::create(&file_name).map_err(|e| format!("{file_name}: {e}"))?;
+        }
+    };
+    let mut shoot = |input: &FrameInput, file_name: &str| -> Result<(), String> {
+        let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("snapshot") });
+        renderer.render(&gpu, &mut enc, &off.view, input);
+        off.copy_out(&mut enc);
+        gpu.queue.submit([enc.finish()]);
+        off.read(&gpu, &mut px);
+        let file = std::fs::File::create(file_name).map_err(|e| format!("{file_name}: {e}"))?;
         let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
         enc.set_color(png::ColorType::Rgba);
         enc.set_depth(png::BitDepth::Eight);
         let mut wr = enc.write_header().map_err(|e| e.to_string())?;
-        wr.write_image_data(&px).map_err(|e| e.to_string())?;
+        wr.write_image_data(&px).map_err(|e| e.to_string())
+    };
+    if a.story {
+        // the scene computed to its end, and its story as told then (held, or frame by frame)
+        let director = DirectorConfig { dance_share: a.dances, scene_revs: a.scene_revs };
+        let (scene, end, annals) = story_scene(a.scene, a.seed, director);
+        for i in 0..a.frames {
+            let s = if a.frames == 1 { 0.5 * STORY_SECONDS } else { i as f64 / fps };
+            let input = story_still(&scene, end, &annals, &mut paths, a.look, a.palettes, seconds_per_rev, s);
+            shoot(&input, &file_name(i))?;
+            if i == 0 || i + 1 == a.frames {
+                println!("{} (its story) -> {}", scene.title, file_name(i));
+            }
+        }
+        return Ok(());
+    }
+    let revs_per_frame = 1.0 / (fps * seconds_per_rev);
+    let last = a.at + (a.frames - 1) as f64 * revs_per_frame;
+    let (scene, _) = snapshot_scene(a.scene, a.seed, last);
+    for i in 0..a.frames {
+        let revs = a.at + i as f64 * revs_per_frame;
+        let time = (revs * seconds_per_rev) as f32;
+        let input = still_frame(&scene, revs * moirai_core::REV, &mut paths, a.look, a.palettes, time, seconds_per_rev);
+        shoot(&input, &file_name(i))?;
         if i == 0 || i + 1 == a.frames {
-            println!("{} ({}) -> {file_name}", scene.title, input.palette.name);
+            println!("{} ({}) -> {}", scene.title, input.palette.name, file_name(i));
         }
     }
     Ok(())
@@ -208,45 +238,58 @@ fn snapshot(a: &Args, path: &str) -> Result<(), String> {
 
 /// Simulate scenes without showing them and report how long their planets lasted.
 fn planet_stats(a: &Args, count: usize) -> Result<(), String> {
-    use moirai_core::planet::Fate;
     let director = DirectorConfig { dance_share: a.dances, scene_revs: a.scene_revs };
-    let mut all: Vec<f64> = Vec::new();
-    let (mut eras, mut civs): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
-    let (mut swallowed, mut ejected, mut survived, mut scorched) = (0, 0, 0, 0);
+    let year = moirai_core::annals::year();
     let median = |v: &mut Vec<f64>| {
         v.sort_by(f64::total_cmp);
         v.get(v.len() / 2).copied().unwrap_or(0.0)
     };
-    for (title, runs) in planet_runs(a.seed, director, a.scene, count) {
-        let mut revs: Vec<f64> = runs.iter().map(|r| r.0).collect();
-        let longest = revs.iter().copied().fold(0.0, f64::max);
-        let n = |f: Option<Fate>| runs.iter().filter(|r| r.1 == f).count();
-        let (s, e, k) = (n(Some(Fate::Swallowed)), n(Some(Fate::Ejected)), n(None));
-        let burnt = n(Some(Fate::Scorched));
-        scorched += burnt;
+    let durations = |d: Option<Durations>| match d {
+        Some(d) => format!("{} ({:.1}/{:.1}/{:.0} y)", d.count, d.shortest / year, d.median / year, d.longest / year),
+        None => "0".into(),
+    };
+    let (mut lives, mut eras, mut civs, mut fates) = (Vec::new(), Vec::new(), Vec::new(), [0usize; 4]);
+    for (title, end, an) in scene_annals(a.seed, director, a.scene, count) {
+        let f = an.fates();
+        let within = |w: &Span, s: &Span| s.start >= w.start && s.end <= w.end;
+        for w in &an.worlds {
+            lives.push(w.span.length() / year);
+            eras.push(an.eras.iter().filter(|e| within(&w.span, &e.span)).count() as f64);
+            civs.push(an.civilisations.iter().filter(|c| within(&w.span, c)).count() as f64);
+        }
+        let name = title.split(" · ").next().unwrap_or(&title).to_string();
         println!(
-            "{title:<44} {:3} planets  median {:5.1} rev  longest {:5.1} rev  {e} ejected, {s} swallowed, {burnt} scorched{}",
-            runs.len(),
-            median(&mut revs),
-            longest,
-            if k > 0 { ", 1 lasted to the end" } else { "" }
+            "{name:<22} {:4.0} years: {:3} worlds ({}/{}/{}/{} swallowed/ejected/scorched/left), {:3} civilisations {}, \
+             stable eras {}, chaotic eras {}",
+            end / year,
+            an.worlds.len(),
+            f[0],
+            f[1],
+            f[2],
+            f[3],
+            an.civilisations.len(),
+            durations(Durations::of(an.civilisations.iter().copied())),
+            durations(an.era_durations(true)),
+            durations(an.era_durations(false)),
         );
-        all.extend(&revs);
-        eras.extend(runs.iter().map(|r| r.2.era as f64));
-        civs.extend(runs.iter().map(|r| r.2.civilisation as f64));
-        (swallowed, ejected, survived) = (swallowed + s, ejected + e, survived + k);
+        for k in 0..4 {
+            fates[k] += f[k];
+        }
     }
-    let m = median(&mut all);
+    let m = median(&mut lives);
     println!(
-        "\nall {count} scenes: {} planets, median lifetime {m:.1} rev ({:.0} s on screen, where the planet slows the \
-         scene down); {ejected} ejected, {swallowed} swallowed, {scorched} scorched, {survived} lasted to the end of \
-         their scene",
-        all.len(),
-        m * a.seconds_per_rev / PLANET_PACE,
+        "\nall {count} scenes: {} worlds, median life {m:.0} years ({:.0} s on screen at the planet's pace); {} swallowed, \
+         {} ejected, {} scorched, {} lasted to the end of their scene (counts: shortest/median/longest in years)",
+        lives.len(),
+        m * year / moirai_core::REV * a.seconds_per_rev / PLANET_PACE,
+        fates[0],
+        fates[1],
+        fates[2],
+        fates[3],
     );
     let most = |v: &Vec<f64>| v.iter().copied().fold(0.0, f64::max);
     println!(
-        "per planet: median {:.0} eras (most {:.0}) and {:.0} civilisations (most {:.0})",
+        "per world: median {:.0} eras (most {:.0}) and {:.0} civilisations (most {:.0})",
         median(&mut eras),
         most(&eras),
         median(&mut civs),

@@ -66,16 +66,26 @@ See `moirai --help` for all options, `moirai --list` for the choreographies, and
   it is shown the scene runs at half speed, so that its orbit can be followed, and the suns'
   glow is smaller, so that it does not hide a planet close to its sun.
 
-  A readout in the top-right corner tells its story. The era is **stable** while the planet is
-  bound to one sun, the others barely disturb it and it is neither boiling nor frozen (180 to
+  A readout in the top-right corner follows the planet. The era is **stable** while the planet
+  is bound to one sun, the others barely disturb it and it is neither boiling nor frozen (180 to
   400 K), and **chaotic** otherwise; below it, which era of which planet this is and whether its
   civilisation lives. A graph shows the surface temperature over the last half minute on a log
-  scale (10 K to 10,000 K), with the band where a civilisation can live, the eras shaded along
-  the time axis, and a line where one planet was lost and the next began. The temperature comes
-  from the three suns' light; the surface responds within a couple of months, like Earth's
-  oceans, so an elliptical orbit has seasons. It also tints the planet. A civilisation perishes
-  when the seas boil (400 K) or freeze solid (180 K) for more than a season; the planet carries
-  on, and a new civilisation rises once the climate has stayed mild for a few planet years.
+  scale from 100 K to 1,000 K (a planet is nearly always out of the picture before it gets
+  colder, and lost to a sun soon after it gets hotter; beyond that the line runs along the
+  edge), with the band where a civilisation can live, the eras shaded along the time axis, and a
+  line where one planet was lost and the next began. The temperature comes from the three suns'
+  light; the surface responds within a couple of months, like Earth's oceans, so an elliptical
+  orbit has seasons. It also tints the planet. A civilisation perishes when the seas boil
+  (400 K) or freeze solid (180 K) for more than a season; the planet carries on, and a new
+  civilisation rises once the climate has stayed mild for a few planet years.
+
+  When a scene ends, its story is told for 30 seconds over the darkened sky: how many years it
+  lasted, how many worlds, civilisations and eras it saw and how they ended, a timeline of every
+  world with its temperature, its eras and the lifetimes of its civilisations, and the shortest,
+  median and longest of each. A year is one orbit of a newborn planet (every planet starts on
+  the same orbit), about 0.6 s on screen; a scene is about 460 years. `n` ends the story early,
+  and a scene skipped with `n` tells none. While the story holds still, no frames are drawn at
+  all. `moirai --snapshot story.png --story` renders one.
 
 ### In a Ghostty split
 
@@ -146,6 +156,9 @@ data/                the stable-orbit catalogue
   its own small steps, reading the stars' positions from that step's dense output, so the stars
   are untouched and steering rewrites recompute the planet too. Its losses and restarts are
   decided ahead of the display like everything else.
+- `annals` — the story of a scene's planets, gathered from the planet's samples as they are
+  shown: every world, era and civilisation with its span, and the temperature in quarter-year
+  slices, which the end-of-scene story draws its timeline from.
 - Rendering — each body's trail goes into its own channel of an HDR texture. The trail is cut
   into the longest segments that stay within 0.3 px of the path (few segments, little
   overdraw), and the timeline records how far every body has travelled, so effects can be
@@ -167,8 +180,9 @@ data/                the stable-orbit catalogue
 `cargo test --release` covers orbit closure and conservation, bit-identical restarts,
 conservation-preserving nudges, steered runs replaying cleanly, the real-time timeline, and the
 terminal input parser (keys versus graphics replies), the smoke noise volume (tiling and
-normalisation), how stardust fades by turning, and the planet (stable orbits, losses and
-restarts, a path that leaves the stars bit-for-bit unchanged and repeats exactly).
+normalisation), how stardust fades by turning, the planet (stable orbits, losses and restarts, a
+path that leaves the stars bit-for-bit unchanged and repeats exactly), and the story of its
+worlds, eras and civilisations and how it is laid out.
 
 ## Credits
 

@@ -6,7 +6,9 @@
 //! * [`timeline`] (Clotho): the committed future of a scene, filled ahead of the display.
 //! * [`library`] / [`scene`]: stable choreographies, random dances and the director.
 //! * [`planet`]: a massless planet among the three suns, restarted when it is lost.
+//! * [`annals`]: the story of a scene's planets, their eras and civilisations, for its end.
 
+pub mod annals;
 pub mod events;
 pub mod library;
 pub mod physics;
