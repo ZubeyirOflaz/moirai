@@ -30,7 +30,8 @@ USAGE
 KEYS
   Esc / q  quit      n  next scene      space  pause
   t  trails: smoke -> lines -> stardust  c  next colour palette
-  p  show the planet
+  p  show the planet                     f  full screen (from a terminal pane: the same scene
+                                            goes full screen; Esc, q or f return to the pane)
 
 OPTIONS
   --scene S            first scene: random | figure8 | choreo:<id> | dance:<seed>
@@ -340,7 +341,7 @@ fn main() -> ExitCode {
         Mode::PlanetStats(n) => planet_stats(&a, *n),
         Mode::Term => term::run(
             cfg,
-            term::TermOptions { fps: a.fps.unwrap_or(TERM_FPS), scale: a.scale, look: a.look, dry_run: a.dry_run, dry_size: a.size },
+            term::TermOptions { fps: a.fps.unwrap_or(TERM_FPS), window_fps: a.fps.unwrap_or(60.0), scale: a.scale, look: a.look, dry_run: a.dry_run, dry_size: a.size },
         ),
         Mode::Window | Mode::Fullscreen if a.dry_run.is_some() => Gpu::new(instance(), None).and_then(|gpu| {
             let seconds = a.dry_run.unwrap_or(10.0);

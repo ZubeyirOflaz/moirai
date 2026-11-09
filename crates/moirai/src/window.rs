@@ -1,12 +1,15 @@
-//! Native window output (fullscreen by default): the screensaver mode.
+//! Native window output (fullscreen by default): the screensaver mode. A terminal pane opens it
+//! too (`f`), handing over its engine so that the very same scene goes on full screen.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
@@ -32,6 +35,9 @@ struct App {
     opts: WindowOptions,
     gfx: Option<Gfx>,
     engine: Option<Engine>,
+    /// Opened from a terminal pane: leaving (Esc, q or f) hands the engine back, and so does
+    /// this flag turning true (the pane was told to quit).
+    pane_quit: Option<&'static AtomicBool>,
     last: Instant,
     next_frame: Instant,
     /// The frame on screen is a still one (see `Engine::still`): until that ends it can stay.
@@ -40,6 +46,11 @@ struct App {
 }
 
 impl App {
+    fn new(cfg: EngineConfig, opts: WindowOptions, engine: Option<Engine>, pane_quit: Option<&'static AtomicBool>) -> Self {
+        let now = Instant::now();
+        Self { cfg, opts, gfx: None, engine, pane_quit, last: now, next_frame: now, shown_still: false, error: None }
+    }
+
     fn init(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
         let mut attrs = Window::default_attributes().with_title("Moirai").with_inner_size(LogicalSize::new(1280.0, 800.0));
         if self.opts.fullscreen {
@@ -70,7 +81,9 @@ impl App {
         surface.configure(&gpu.device, &config);
         let renderer = Renderer::new(&gpu, format, config.width, config.height);
         self.gfx = Some(Gfx { window, surface, gpu, config, renderer });
-        self.engine = Some(Engine::start(self.cfg));
+        if self.engine.is_none() {
+            self.engine = Some(Engine::start(self.cfg));
+        }
         self.last = Instant::now();
         Ok(())
     }
@@ -126,6 +139,15 @@ impl ApplicationHandler for App {
                             e.paused = !e.paused;
                         }
                     }
+                    // full screen and back; opened from a pane, back to the pane
+                    Key::Character("f") if self.pane_quit.is_some() => el.exit(),
+                    Key::Character("f") => {
+                        if let Some(g) = self.gfx.as_ref() {
+                            let full = g.window.fullscreen().is_none();
+                            g.window.set_fullscreen(full.then_some(Fullscreen::Borderless(None)));
+                            g.window.set_cursor_visible(!full);
+                        }
+                    }
                     Key::Character("t") => self.opts.look.style = self.opts.look.style.next(),
                     Key::Character("p") => self.opts.look.planet = !self.opts.look.planet,
                     Key::Character("c") => {
@@ -151,6 +173,9 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if self.pane_quit.is_some_and(|q| q.load(Ordering::Relaxed)) {
+            el.exit();
+        }
         let now = Instant::now();
         if now >= self.next_frame {
             if self.shown_still && self.engine.as_ref().is_some_and(Engine::still) {
@@ -171,19 +196,27 @@ impl ApplicationHandler for App {
 
 pub fn run(cfg: EngineConfig, opts: WindowOptions) -> Result<(), String> {
     let el = EventLoop::new().map_err(|e| e.to_string())?;
-    let mut app = App {
-        cfg,
-        opts,
-        gfx: None,
-        engine: None,
-        last: Instant::now(),
-        next_frame: Instant::now(),
-        shown_still: false,
-        error: None,
-    };
+    let mut app = App::new(cfg, opts, None, None);
     el.run_app(&mut app).map_err(|e| e.to_string())?;
     match app.error {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// Show `engine` full screen until Esc, q or f (or until `quit` turns true), then hand it back
+/// with the look as last set, and why the window could not be shown if it could not. The
+/// caller keeps the event loop: a process can make only one, but it can run it again.
+pub fn fullscreen(
+    el: &mut EventLoop<()>,
+    cfg: EngineConfig,
+    engine: Engine,
+    look: Look,
+    fps: f64,
+    quit: &'static AtomicBool,
+) -> (Engine, Look, Option<String>) {
+    let mut app = App::new(cfg, WindowOptions { fullscreen: true, fps, look }, Some(engine), Some(quit));
+    let run = el.run_app_on_demand(&mut app).map_err(|e| e.to_string()).err();
+    let engine = app.engine.take().expect("the window gives the engine back");
+    (engine, app.opts.look, run.or(app.error.take()))
 }

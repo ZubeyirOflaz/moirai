@@ -34,8 +34,9 @@ cargo build --release
 ./target/release/moirai --term     # inside the current terminal pane (Ghostty, kitty, WezTerm)
 ```
 
-Keys: `Esc`/`q` quit · `n` next scene · `space` pause · `t` smoke → lines → stardust · `c` next palette ·
-`p` planet.
+Keys: `Esc`/`q` quit · `n` next scene · `space` pause · `t` smoke → lines → stardust · `c` next
+palette · `p` planet · `f` full screen (in a terminal pane: the same scene goes full screen, and
+`Esc`, `q` or `f` bring you back to the pane).
 See `moirai --help` for all options, `moirai --list` for the choreographies, and
 `moirai --snapshot frame.png --scene choreo:2` for a still.
 
@@ -89,13 +90,14 @@ See `moirai --help` for all options, `moirai --list` for the choreographies, and
 
 ### In a Ghostty split
 
-Open a split (e.g. `ctrl+shift+o` / `ctrl+shift+e` by default) and run `moirai --term` there.
-Frames are rendered on the GPU and shown with the kitty graphics protocol, so the pane shows real
-pixels at its native resolution, not text-mode art. They travel through two files in `/dev/shm`
-that are mapped once and overwritten in turn (`t=f`); Ghostty answers OK for each frame before
-its file is reused, so frames never tear and moirai never runs ahead of the terminal. Terminals
-that refuse files get a fresh shared-memory object per frame (`t=s`) or, as a last resort,
-base64 data at 10 fps.
+Open a split (e.g. `ctrl+shift+o` / `ctrl+shift+e` by default) and run `moirai --term` there;
+`f` shows the same scene full screen whenever you want a closer look, and `Esc` returns to the
+pane. Frames are rendered on the GPU and shown with the kitty graphics protocol, so the pane
+shows real pixels at its native resolution, not text-mode art. They travel through two files in
+`/dev/shm` that are mapped once and overwritten in turn (`t=f`); Ghostty answers OK for each
+frame before its file is reused, so frames never tear and moirai never runs ahead of the
+terminal. Terminals that refuse files get a fresh shared-memory object per frame (`t=s`) or, as
+a last resort, base64 data at 10 fps.
 
 Ghostty then has more work per frame than moirai itself: it reads the frame, copies it, uploads
 it into a new GPU texture and redraws its window. In a quarter-screen pane (1391×858) at 30 fps

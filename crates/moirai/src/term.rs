@@ -16,6 +16,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use winit::event_loop::EventLoop;
+
 use crate::engine::{Engine, EngineConfig};
 use crate::render::{Gpu, Look, OFFSCREEN_FORMAT, Offscreen, Renderer, instance};
 
@@ -343,6 +345,8 @@ fn geometry(scale: f32) -> io::Result<Geometry> {
 
 pub struct TermOptions {
     pub fps: f64,
+    /// Frame rate of the full-screen window the pane opens with `f`.
+    pub window_fps: f64,
     pub scale: f32,
     pub look: Look,
     /// Measure the cost of producing frames without a terminal (frame files are created and
@@ -529,6 +533,8 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
     let mut input = [0u8; 4096];
     // the frame on screen is a still one (see `Engine::still`): until that ends it can stay
     let mut shown_still = false;
+    // for showing the scene full screen (`f`), made the first time: a process gets one
+    let mut windows: Option<EventLoop<()>> = None;
 
     while !QUIT.load(Ordering::Relaxed) {
         // sleep until the next frame is due, waking early for keys and replies
@@ -537,7 +543,7 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
         unsafe { libc::poll(&mut pfd, 1, wait.as_micros().div_ceil(1000) as i32) };
         let n = unsafe { libc::read(libc::STDIN_FILENO, input.as_mut_ptr().cast(), input.len()) };
         parser.feed(if n > 0 { &input[..n as usize] } else { &[] }, &mut events);
-        let mut quit = false;
+        let (mut quit, mut fullscreen) = (false, false);
         for ev in events.drain(..) {
             if !matches!(ev, Event::Reply { .. }) {
                 shown_still = false;
@@ -549,6 +555,7 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
                 Event::Key(b't') => look.style = look.style.next(),
                 Event::Key(b'p') => look.planet = !look.planet,
                 Event::Key(b'c') => engine.cycle_palette(),
+                Event::Key(b'f') => fullscreen = true,
                 Event::Key(_) => {}
                 Event::Reply { id, ok } => {
                     if let Some(fallback) = transport.reply(id, ok) {
@@ -560,6 +567,19 @@ fn run_inner(gpu: &Gpu, cfg: EngineConfig, opts: &TermOptions) -> Result<(), Str
         }
         if quit {
             break;
+        }
+        if fullscreen {
+            // the same engine goes on in a full-screen window until Esc, q or f; meanwhile the
+            // pane keeps its last frame (and the terminal its rest)
+            if windows.is_none() {
+                windows = EventLoop::new().ok();
+            }
+            if let Some(el) = windows.as_mut() {
+                let (e, l, _) = crate::window::fullscreen(el, cfg, engine, look, opts.window_fps, &QUIT);
+                (engine, look) = (e, l);
+                (last, next_frame, shown_still) = (Instant::now(), Instant::now(), false);
+            }
+            continue;
         }
         if let Some(fallback) = transport.check_silence(first_sent) {
             transport = fallback;
