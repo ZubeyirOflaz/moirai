@@ -92,11 +92,11 @@ it into a new GPU texture and redraws its window. In a quarter-screen pane (1391
 that came to about 19% of one core, against moirai's 6–7%, plus a few percent in GNOME Shell for
 compositing. About 8% of Ghostty's share is just redrawing the window 30 times a second, which
 any animation in a terminal costs. Frames go out as RGB rather than RGBA, which saves Ghostty
-about a tenth. The rest scales with the frame rate and, less, with the pixel count: `--fps 20`
-cuts Ghostty's share by about a fifth, `--fps 15` by over a third and `--scale 0.5` by about a
-quarter (`--scale 0.75` hardly helps). The stars cross such a pane in a few seconds, about 10 px
-per frame at 30 fps, so lower frame rates show as visible stepping. moirai cannot tell when its
-tab is hidden, so quit it (`q`) when you will not look at it for a while.
+about a tenth. The rest scales with the frame rate and, less, with the pixel count, so the pane
+runs at 20 fps by default: a fifth less for Ghostty than 30 fps, and at a quarter of the screen
+it looks fine. `--fps 30` gives smoother motion; `--fps 15` saves over a third and `--scale 0.5`
+about a quarter (`--scale 0.75` hardly helps). moirai cannot tell when its tab is hidden, so
+quit it (`q`) when you will not look at it for a while.
 
 ### Cost
 

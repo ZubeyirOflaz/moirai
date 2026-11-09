@@ -44,7 +44,7 @@ OPTIONS
                        scene runs at half speed while it is shown)
   --planet-stats N     simulate N scenes without showing anything and report how long their
                        planets lasted
-  --fps N              frame rate (default 60 in a window, 30 in a terminal)
+  --fps N              frame rate (default 60 in a window, 20 in a terminal)
   --scale F            terminal render resolution relative to the pane (default 1)
   --seed N             random seed
   --size WxH           snapshot size (default 1280x800)
@@ -53,6 +53,10 @@ OPTIONS
   --dry-run SECONDS    measure the frame cost at --size without showing anything (with
                        --term: including the copy into the frame the terminal reads)
 ";
+
+/// Frame rate in a terminal pane: a quarter-screen pane looks fine at 20 fps, and every frame
+/// costs the terminal more than it costs moirai (see the README).
+const TERM_FPS: f64 = 20.0;
 
 struct Args {
     mode: Mode,
@@ -293,7 +297,7 @@ fn main() -> ExitCode {
         Mode::PlanetStats(n) => planet_stats(&a, *n),
         Mode::Term => term::run(
             cfg,
-            term::TermOptions { fps: a.fps.unwrap_or(30.0), scale: a.scale, look: a.look, dry_run: a.dry_run, dry_size: a.size },
+            term::TermOptions { fps: a.fps.unwrap_or(TERM_FPS), scale: a.scale, look: a.look, dry_run: a.dry_run, dry_size: a.size },
         ),
         Mode::Window | Mode::Fullscreen if a.dry_run.is_some() => Gpu::new(instance(), None).and_then(|gpu| {
             let seconds = a.dry_run.unwrap_or(10.0);

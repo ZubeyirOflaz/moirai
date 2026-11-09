@@ -28,10 +28,8 @@ frame), one image id replaced in place (no gain), animation-frame edits (Ghostty
 them on the CPU and still re-uploads the whole texture: costlier), dirty tiles (the twinkling
 starfield changes every tile every frame).
 
-- [ ] Try 20 fps with motion blur: draw star cores, the planet and the newest bit of each trail
-      smeared over the frame interval, so that 20 fps steps (about 16 px in a quarter-screen
-      pane) read as motion. Would cut Ghostty's and GNOME Shell's share by about a third; only
-      worth keeping if it looks as smooth as plain 30 fps.
+The pane now runs at 20 fps by default (a fifth less for Ghostty than 30 fps); at a quarter of
+the screen that looks fine without motion blur.
 
 ## Planet
 
