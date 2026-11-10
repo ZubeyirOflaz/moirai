@@ -36,7 +36,7 @@ KEYS
 OPTIONS
   --scene S            first scene: random | figure8 | choreo:<id> | dance:<seed>
   --dances F           share of free dances vs choreographies, 0..1 (default 0.35)
-  --scene-revs N       scene length in revolutions (default 24)
+  --scene-revs N       scene length in revolutions (default 12)
   --seconds-per-rev S  screen time per revolution (default 6)
   --trails T           smoke (glowing plasma plumes, default) | lines (glowing threads,
                        cheapest) | dust (stardust motes)
@@ -100,7 +100,7 @@ fn parse() -> Result<Args, String> {
         mode: Mode::Fullscreen,
         scene: SceneRequest::Random,
         dances: 0.35,
-        scene_revs: 24.0,
+        scene_revs: DirectorConfig::default().scene_revs,
         seconds_per_rev: 6.0,
         fps: None,
         scale: 1.0,

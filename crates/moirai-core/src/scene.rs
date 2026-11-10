@@ -38,13 +38,14 @@ pub struct Scene {
 pub struct DirectorConfig {
     /// Probability that the next scene is a dance rather than a choreography.
     pub dance_share: f64,
-    /// Scene length in revolutions.
+    /// Scene length in revolutions (12: about a minute and a quarter, or two and a half with the
+    /// planet shown, which halves the pace).
     pub scene_revs: f64,
 }
 
 impl Default for DirectorConfig {
     fn default() -> Self {
-        Self { dance_share: 0.35, scene_revs: 24.0 }
+        Self { dance_share: 0.35, scene_revs: 12.0 }
     }
 }
 

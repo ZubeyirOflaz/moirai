@@ -84,7 +84,7 @@ See `moirai --help` for all options, `moirai --list` for the choreographies, and
   lasted, how many worlds, civilisations and eras it saw and how they ended, a timeline of every
   world with its temperature, its eras and the lifetimes of its civilisations, and the shortest,
   median and longest of each. A year is one orbit of a newborn planet (every planet starts on
-  the same orbit), about 0.6 s on screen; a scene is about 460 years. `n` ends the story early,
+  the same orbit), about 0.6 s on screen; a scene is about 230 years. `n` ends the story early,
   and a scene skipped with `n` tells none. While the story holds still, no frames are drawn at
   all. `moirai --snapshot story.png --story` renders one.
 
