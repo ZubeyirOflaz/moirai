@@ -1,6 +1,7 @@
 //! The engine: a background physics thread keeps each scene's future computed ahead of the
 //! display (and sleeps otherwise); the render side advances a clock, fades between scenes,
-//! frames the camera and turns samples into trails.
+//! frames the camera, turns samples into trails and, with the planet shown, tells each scene's
+//! story when it ends.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

@@ -28,15 +28,19 @@ USAGE
   moirai --list          list the stable choreographies
 
 KEYS
-  Esc / q  quit      n  next scene      space  pause
-  t  trails: smoke -> lines -> stardust  c  next colour palette
-  p  show the planet                     f  full screen (from a terminal pane: the same scene
-                                            goes full screen; Esc, q or f return to the pane)
+  Esc / q  quit (in a full-screen window opened from a terminal pane: back to the pane)
+  n        next scene (while a story is told: end it)
+  space    pause
+  t        trails: smoke -> lines -> stardust
+  c        next colour palette
+  p        planet on or off
+  f        full screen or windowed (in a terminal pane: the same scene goes full screen)
 
 OPTIONS
   --scene S            first scene: random | figure8 | choreo:<id> | dance:<seed>
   --dances F           share of free dances vs choreographies, 0..1 (default 0.35)
-  --scene-revs N       scene length in revolutions (default 12)
+  --scene-revs N       scene length in revolutions (default 12: about 72 s, twice that
+                       with the planet shown)
   --seconds-per-rev S  screen time per revolution (default 6)
   --trails T           smoke (glowing plasma plumes, default) | lines (glowing threads,
                        cheapest) | dust (stardust motes)
@@ -48,8 +52,8 @@ OPTIONS
                        replaced by a new one when it hits a star or leaves the system (the
                        scene runs at half speed while it is shown); when a scene ends, the
                        story of its worlds is told for 30 s
-  --planet-stats N     simulate N scenes without showing anything and report how long their
-                       planets lasted
+  --planet-stats N     simulate N scenes without showing anything and print each one's story
+                       in numbers: worlds, civilisations, eras and how long they lasted
   --fps N              frame rate (default 60 in a window, 20 in a terminal)
   --scale F            terminal render resolution relative to the pane (default 1)
   --seed N             random seed
